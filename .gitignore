@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# Data files
+data/raw/*
+data/processed/*
+*.json
+*.csv
+
+# Notebooks
+.ipynb_checkpoints/
+
