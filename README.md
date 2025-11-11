@@ -1,6 +1,6 @@
 # SSENSE Chatbot Prototype
 
-This repo contains scraping, enrichment, and chatbot logic for a conversational shopping assistant powered by SSENSE product data.
+This repo contains scraping, enrichment, and chatbot logic for a conversational shopping assistant powered by COS product data.
 
 ## Folder Structure
 - `scraping/`: Web scraping scripts and selectors
