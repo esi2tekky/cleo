@@ -10,3 +10,13 @@ pandas>=2.0.0
 beautifulsoup4>=4.12.0
 requests>=2.31.0
 lxml>=4.9.0
+# For visual embeddings and style enrichment
+torch>=2.0.0
+torchvision>=0.15.0
+transformers>=4.30.0
+open_clip_torch>=2.20.0
+accelerate>=0.20.0
+# OpenAI CLIP (used as fallback when Fashion CLIP has compatibility issues)
+git+https://github.com/openai/CLIP.git
+Pillow>=9.0.0
+numpy>=1.24.0
