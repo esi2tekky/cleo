@@ -836,32 +836,79 @@ def scrape_category(category_url: str, category_name: str, gender: str, max_prod
     """Synchronous wrapper for scrape_category_async."""
     return asyncio.run(scrape_category_async(category_url, category_name, gender, max_products))
 
-async def scrape_multiple_categories_parallel(categories: List[Dict]) -> pd.DataFrame:
-    """Scrape multiple categories in parallel."""
-    tasks = []
-    for cat in categories:
-        task = scrape_category_async(
-            category_url=cat['url'],
-            category_name=cat['category'],
-            gender=cat['gender'],
-            max_products=cat.get('max_products', None)
-        )
-        tasks.append(task)
+async def scrape_multiple_categories_parallel(categories: List[Dict], batch_size: int = 3) -> pd.DataFrame:
+    """
+    Scrape multiple categories in parallel with batching.
     
-    # Run all tasks in parallel
-    results = await asyncio.gather(*tasks)
+    Args:
+        categories: List of category dictionaries
+        batch_size: Number of categories to process simultaneously (default: 3)
+    """
+    all_dfs = []
+    total = len(categories)
+    
+    # Process in batches to avoid overwhelming the system
+    for batch_start in range(0, total, batch_size):
+        batch_end = min(batch_start + batch_size, total)
+        batch = categories[batch_start:batch_end]
+        batch_num = (batch_start // batch_size) + 1
+        total_batches = (total + batch_size - 1) // batch_size
+        
+        print(f"\n{'='*60}")
+        print(f"BATCH {batch_num}/{total_batches}: Processing {len(batch)} categories")
+        print(f"{'='*60}\n")
+        
+        tasks = []
+        for cat in batch:
+            task = scrape_category_async(
+                category_url=cat['url'],
+                category_name=cat['category'],
+                gender=cat['gender'],
+                max_products=cat.get('max_products', None)
+            )
+            tasks.append(task)
+        
+        # Run batch with error handling
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Process results, handling exceptions
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    print(f"\n❌ Error in category {batch[i]['category']}: {result}")
+                    print(f"   Continuing with other categories...\n")
+                elif isinstance(result, pd.DataFrame) and not result.empty:
+                    all_dfs.append(result)
+                    print(f"✅ Completed: {batch[i]['gender']} {batch[i]['category']} ({len(result)} products)")
+                else:
+                    print(f"⚠️  No products found: {batch[i]['gender']} {batch[i]['category']}")
+        
+        except Exception as e:
+            print(f"\n❌ Batch error: {e}")
+            print(f"   Continuing with next batch...\n")
+            continue
+        
+        # Small delay between batches to be respectful
+        if batch_end < total:
+            print(f"\n⏸️  Waiting 5 seconds before next batch...\n")
+            await asyncio.sleep(5)
     
     # Combine all DataFrames
-    all_dfs = [df for df in results if not df.empty]
     if not all_dfs:
         return pd.DataFrame()
     
     combined_df = pd.concat(all_dfs, ignore_index=True)
     return combined_df
 
-def scrape_multiple_categories(categories: List[Dict]) -> pd.DataFrame:
-    """Synchronous wrapper for parallel category scraping."""
-    return asyncio.run(scrape_multiple_categories_parallel(categories))
+def scrape_multiple_categories(categories: List[Dict], batch_size: int = 3) -> pd.DataFrame:
+    """
+    Synchronous wrapper for parallel category scraping.
+    
+    Args:
+        categories: List of category dictionaries
+        batch_size: Number of categories to process simultaneously (default: 3)
+    """
+    return asyncio.run(scrape_multiple_categories_parallel(categories, batch_size=batch_size))
 
 def main():
     """Main function."""
@@ -885,30 +932,135 @@ def main():
     
     # Define categories to scrape in parallel
     categories = [
+        # Men's categories
+        {
+            'url': "https://www.cos.com/en-us/men/knitwear",
+            'category': "knitwear",
+            'gender': "men",
+            'max_products': None  # All products
+        },
+        {
+            'url': "https://www.cos.com/en-us/men/coats-and-jackets",
+            'category': "coats-and-jackets",
+            'gender': "men",
+            'max_products': None
+        },
         {
             'url': "https://www.cos.com/en-us/men/trousers",
             'category': "trousers",
             'gender': "men",
-            'max_products': 4  # Testing with 4 products
+            'max_products': None
+        },
+        {
+            'url': "https://www.cos.com/en-us/men/jeans",
+            'category': "jeans",
+            'gender': "men",
+            'max_products': None
         },
         {
             'url': "https://www.cos.com/en-us/men/t-shirts/polo-shirts",
             'category': "polo-shirts",
             'gender': "men",
-            'max_products': 4  # Testing with 4 products
+            'max_products': None
         },
         {
-            'url': "https://www.cos.com/en-us/men/knitwear",
-            'category': "knitwear",
+            'url': "https://www.cos.com/en-us/men/t-shirts",
+            'category': "t-shirts",
             'gender': "men",
-            'max_products': 4  # Testing with 4 products
+            'max_products': None
+        },
+        {
+            'url': "https://www.cos.com/en-us/men/shirts",
+            'category': "shirts",
+            'gender': "men",
+            'max_products': None
+        },
+        {
+            'url': "https://www.cos.com/en-us/men/suits/suits-and-tailoring",
+            'category': "suits-and-tailoring",
+            'gender': "men",
+            'max_products': None
+        },
+        {
+            'url': "https://www.cos.com/en-us/men/sweatshirts",
+            'category': "sweatshirts",
+            'gender': "men",
+            'max_products': None
+        },
+        # Women's categories
+        {
+            'url': "https://www.cos.com/en-us/women/knitwear",
+            'category': "knitwear",
+            'gender': "women",
+            'max_products': None
+        },
+        {
+            'url': "https://www.cos.com/en-us/women/knitwear/cashmere-knitwear",
+            'category': "cashmere-knitwear",
+            'gender': "women",
+            'max_products': None
+        },
+        {
+            'url': "https://www.cos.com/en-us/women/coats-and-jackets",
+            'category': "coats-and-jackets",
+            'gender': "women",
+            'max_products': None
+        },
+        {
+            'url': "https://www.cos.com/en-us/women/tops",
+            'category': "tops",
+            'gender': "women",
+            'max_products': None
+        },
+        {
+            'url': "https://www.cos.com/en-us/women/trousers",
+            'category': "trousers",
+            'gender': "women",
+            'max_products': None
+        },
+        {
+            'url': "https://www.cos.com/en-us/women/jeans",
+            'category': "jeans",
+            'gender': "women",
+            'max_products': None
+        },
+        {
+            'url': "https://www.cos.com/en-us/women/t-shirts",
+            'category': "t-shirts",
+            'gender': "women",
+            'max_products': None
+        },
+        {
+            'url': "https://www.cos.com/en-us/women/shirts",
+            'category': "shirts",
+            'gender': "women",
+            'max_products': None
+        },
+        {
+            'url': "https://www.cos.com/en-us/women/dresses",
+            'category': "dresses",
+            'gender': "women",
+            'max_products': None
+        },
+        {
+            'url': "https://www.cos.com/en-us/women/skirts",
+            'category': "skirts",
+            'gender': "women",
+            'max_products': None
+        },
+        {
+            'url': "https://www.cos.com/en-us/women/tailoring",
+            'category': "tailoring",
+            'gender': "women",
+            'max_products': None
         },
     ]
     
-    print(f"Scraping {len(categories)} categories in parallel...\n")
+    print(f"Scraping {len(categories)} categories in batches of 3...\n")
+    print("(This prevents system overload and ensures stability)\n")
     
-    # Scrape all categories in parallel
-    df = scrape_multiple_categories(categories)
+    # Scrape all categories in batches (3 at a time)
+    df = scrape_multiple_categories(categories, batch_size=3)
     
     if df.empty:
         print("\n❌ No data")

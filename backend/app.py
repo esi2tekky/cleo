@@ -31,13 +31,18 @@ def load_data():
     
     data_dir = Path(__file__).parent.parent / "data" / "processed"
     
-    # Load enriched products
+    # Load products - try enriched first, then fallback to cos_all_products
     csv_file = data_dir / "enriched_cos_mens_knitwear.csv"
+    if not csv_file.exists():
+        csv_file = data_dir / "cos_all_products.csv"
+    
     if csv_file.exists():
         products_df = pd.read_csv(csv_file)
-        print(f"✅ Loaded {len(products_df)} products")
+        print(f"✅ Loaded {len(products_df)} products from {csv_file.name}")
     else:
-        print(f"⚠️  No enriched data found at {csv_file}")
+        print(f"⚠️  No product data found. Tried:")
+        print(f"   - {data_dir / 'enriched_cos_mens_knitwear.csv'}")
+        print(f"   - {data_dir / 'cos_all_products.csv'}")
         products_df = pd.DataFrame()
     
     # Load embeddings
@@ -377,9 +382,19 @@ def handle_query():
     
     if material_filters:
         material = material_filters[0]
-        results_df = results_df[
-            results_df['materials'].astype(str).str.lower().str.contains(material, na=False)
-        ]
+        # Check if 'materials' column exists, otherwise search in description and name
+        if 'materials' in results_df.columns:
+            results_df = results_df[
+                results_df['materials'].astype(str).str.lower().str.contains(material, na=False)
+            ]
+        else:
+            # Fallback: search in description and name
+            material_mask = pd.Series([False] * len(results_df), index=results_df.index)
+            if 'description' in results_df.columns:
+                material_mask |= results_df['description'].astype(str).str.lower().str.contains(material, na=False)
+            if 'name' in results_df.columns:
+                material_mask |= results_df['name'].astype(str).str.lower().str.contains(material, na=False)
+            results_df = results_df[material_mask]
     
     # Filter by color - check ALL colors in query
     colors = ['black', 'white', 'navy', 'beige', 'brown', 'grey', 'gray', 'red', 'blue', 
@@ -394,7 +409,17 @@ def handle_query():
     if color_filters:
         color_mask = pd.Series([False] * len(results_df), index=results_df.index)
         for color in color_filters:
-            color_mask |= results_df['colors'].astype(str).str.lower().str.contains(color, na=False)
+            # Check if 'colors' column exists, otherwise search in description and name
+            if 'colors' in results_df.columns:
+                color_mask |= results_df['colors'].astype(str).str.lower().str.contains(color, na=False)
+            else:
+                # Fallback: search in description and name
+                desc_col = 'description' if 'description' in results_df.columns else ''
+                name_col = 'name' if 'name' in results_df.columns else ''
+                if desc_col:
+                    color_mask |= results_df[desc_col].astype(str).str.lower().str.contains(color, na=False)
+                if name_col:
+                    color_mask |= results_df[name_col].astype(str).str.lower().str.contains(color, na=False)
         results_df = results_df[color_mask]
     
     # Filter by price (apply last, as it's often optional)
@@ -436,7 +461,17 @@ def handle_query():
             # Strict mode: must match at least one style keyword
             style_mask = pd.Series([False] * len(results_df), index=results_df.index)
             for style in style_filters:
-                style_mask |= results_df['style_keywords'].astype(str).str.lower().str.contains(style, na=False)
+                # Check if 'style_keywords' column exists, otherwise search in description and name
+                if 'style_keywords' in results_df.columns:
+                    style_mask |= results_df['style_keywords'].astype(str).str.lower().str.contains(style, na=False)
+                else:
+                    # Fallback: search in description and name
+                    desc_col = 'description' if 'description' in results_df.columns else ''
+                    name_col = 'name' if 'name' in results_df.columns else ''
+                    if desc_col:
+                        style_mask |= results_df[desc_col].astype(str).str.lower().str.contains(style, na=False)
+                    if name_col:
+                        style_mask |= results_df[name_col].astype(str).str.lower().str.contains(style, na=False)
             results_df = results_df[style_mask]
         # In non-strict mode, style filters are used for semantic ranking later
     
