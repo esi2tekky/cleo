@@ -8,33 +8,68 @@
 </head>
 <body>
     <div class="container">
-        <header>
-            <h1>🛍️ CLEO Shopping Assistant</h1>
-            <p class="subtitle">Ask me about style, colors, materials, and more!</p>
+        <header class="modern-header">
+            <img src="cleo.png" alt="CLEO" class="logo">
         </header>
 
         <div class="chat-container">
             <div id="messages" class="messages">
-                <div class="message bot-message">
-                    <div class="message-content">
-                        👋 Hi! I'm your style assistant. Try asking:
-                        <ul>
-                            <li>"Show me minimalist black sweaters"</li>
-                            <li>"What colors go with beige?"</li>
-                            <li>"Find wool items under $200"</li>
-                        </ul>
+                <div class="welcome-message">
+                    <div class="bot-avatar">cleo</div>
+                    <div class="message bot-message">
+                        <div class="message-content">
+                            Hi! What can I help find on COS today?
+                        </div>
+                    </div>
+                </div>
+                <div class="suggestion-chips">
+                    <button class="chip" data-suggestion="Find black sweaters under $150">Black sweaters under $150</button>
+                    <button class="chip" data-suggestion="Something to wear on a fall day in Paris">Fall day in Paris</button>
+                    <button class="chip" data-suggestion="Beach day in Greece">Beach day in Greece</button>
+                </div>
+                
+                <!-- Typing indicator -->
+                <div id="typing-indicator" class="typing-indicator" style="display: none;">
+                    <div class="bot-avatar">cleo</div>
+                    <div class="typing-dots">
+                        <div class="dot"></div>
+                        <div class="dot"></div>
+                        <div class="dot"></div>
                     </div>
                 </div>
             </div>
 
-            <div class="input-container">
-                <input 
-                    type="text" 
-                    id="query-input" 
-                    placeholder="Ask about products, styles, colors..."
-                    autocomplete="off"
-                />
-                <button id="send-button">Send</button>
+            <div class="bottom-section">
+                <div class="gender-toggle-modern">
+                    <button id="gender-men" class="gender-btn-modern">MEN</button>
+                    <button id="gender-women" class="gender-btn-modern">WOMEN</button>
+                    <button id="gender-all" class="gender-btn-modern active">ALL</button>
+                </div>
+
+                <div class="image-preview-container" id="image-preview-container" style="display: none;">
+                    <img id="image-preview">
+                    <button id="clear-image" class="clear-image-btn" title="Remove image">×</button>
+                </div>
+
+                <div class="input-container-modern">
+                    <input type="file" id="image-input" accept="image/*" style="display: none;">
+                    <div class="input-wrapper">
+                        <input 
+                            type="text" 
+                            id="query-input" 
+                            placeholder="Search for 'red silk dress' or 'vintage denim'"
+                            autocomplete="off"
+                        />
+                        <button id="image-upload-btn" class="icon-button-modern" title="Upload Image">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                                <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                                <polyline points="21 15 16 10 5 21"></polyline>
+                            </svg>
+                        </button>
+                    </div>
+                    <button id="send-button" class="send-button-modern">Send</button>
+                </div>
             </div>
         </div>
 

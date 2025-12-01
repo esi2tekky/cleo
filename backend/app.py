@@ -11,11 +11,34 @@ from pathlib import Path
 import numpy as np
 from typing import List, Dict, Optional
 import os
+import base64
+from io import BytesIO
+from PIL import Image
 
 # Import enrichment utilities
 import sys
 sys.path.append(str(Path(__file__).parent.parent))
 from utils.enrich import StyleEnricher, load_embeddings
+
+# Try to load from .env.local or .env file if it exists
+try:
+    from dotenv import load_dotenv
+    project_root = Path(__file__).parent.parent
+    env_local_path = project_root / '.env.local'
+    env_path = project_root / '.env'
+    
+    if env_local_path.exists():
+        load_dotenv(env_local_path)
+    elif env_path.exists():
+        load_dotenv(env_path)
+except ImportError:
+    pass  # python-dotenv not installed, skip
+
+# Import new modules
+from backend.openai_client import OpenAIEmbedder
+from backend.conversation import ConversationManager
+from backend.query_parser import QueryParser
+from backend.style_embeddings import get_style_embedding_query, extract_style_context
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for Chrome extension
@@ -24,10 +47,15 @@ CORS(app)  # Enable CORS for Chrome extension
 products_df = None
 embeddings_dict = None
 enricher = None
+openai_embedder = None
+conversation_manager = ConversationManager()
+fashion_clip_enricher = None
+query_parser = QueryParser()
+pinecone_index = None
 
 def load_data():
     """Load enriched data and embeddings."""
-    global products_df, embeddings_dict, enricher
+    global products_df, embeddings_dict, enricher, openai_embedder, fashion_clip_enricher, pinecone_index
     
     data_dir = Path(__file__).parent.parent / "data" / "processed"
     
@@ -45,18 +73,74 @@ def load_data():
         print(f"   - {data_dir / 'cos_all_products.csv'}")
         products_df = pd.DataFrame()
     
-    # Load embeddings
-    embeddings_file = data_dir / "embeddings.pkl"
-    if embeddings_file.exists():
-        embeddings_dict = load_embeddings(embeddings_file)
-        print(f"✅ Loaded {len(embeddings_dict)} embeddings")
+    # Initialize OpenAI embedder
+    if os.getenv("OPENAI_API_KEY"):
+        try:
+            openai_embedder = OpenAIEmbedder(model="text-embedding-3-small")
+            print("✅ OpenAI embedder initialized")
+        except Exception as e:
+            print(f"⚠️  OpenAI not available: {e}")
+            openai_embedder = None
     else:
-        print(f"⚠️  No embeddings found at {embeddings_file}")
-        embeddings_dict = {}
+        print("⚠️  OPENAI_API_KEY not set, using sentence-transformers")
+        openai_embedder = None
     
-    # Initialize enricher (for query encoding)
-    enricher = StyleEnricher(use_clip=False)  # Don't need CLIP for query encoding
-    print("✅ Enricher initialized")
+    # Initialize Fashion CLIP for visual embeddings
+    try:
+        fashion_clip_enricher = StyleEnricher(use_clip=True, use_fashion_clip=True)
+        print("✅ Fashion CLIP initialized for visual embeddings")
+    except Exception as e:
+        print(f"⚠️  Fashion CLIP not available: {e}")
+        fashion_clip_enricher = None
+    
+    # Initialize Pinecone (optional)
+    if os.getenv("PINECONE_API_KEY"):
+        try:
+            from pinecone import Pinecone, ServerlessSpec
+            
+            pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+            index_name = os.getenv("PINECONE_INDEX_NAME", "cos-products")
+            
+            # Check if index exists, create if not
+            existing_indexes = [idx.name for idx in pc.list_indexes()]
+            if index_name not in existing_indexes:
+                print(f"Creating Pinecone index: {index_name}")
+                pc.create_index(
+                    name=index_name,
+                    dimension=1536,  # OpenAI text-embedding-3-small dimension
+                    metric="cosine",
+                    spec=ServerlessSpec(
+                        cloud="aws",
+                        region=os.getenv("PINECONE_ENVIRONMENT", "us-east-1")
+                    )
+                )
+            
+            pinecone_index = pc.Index(index_name)
+            print(f"✅ Pinecone index '{index_name}' connected")
+            embeddings_dict = {}  # Don't load local embeddings if using Pinecone
+        except Exception as e:
+            print(f"⚠️  Pinecone not available: {e}")
+            pinecone_index = None
+    else:
+        print("⚠️  PINECONE_API_KEY not set, using local embeddings")
+        pinecone_index = None
+    
+    # Load local embeddings (if not using Pinecone)
+    if pinecone_index is None:
+        embeddings_file = data_dir / "embeddings_openai.pkl"
+        if not embeddings_file.exists():
+            embeddings_file = data_dir / "embeddings.pkl"
+        
+        if embeddings_file.exists():
+            embeddings_dict = load_embeddings(embeddings_file)
+            print(f"✅ Loaded {len(embeddings_dict)} embeddings from {embeddings_file.name}")
+        else:
+            print(f"⚠️  No embeddings found at {embeddings_file}")
+            embeddings_dict = {}
+    
+    # Initialize enricher (fallback for query encoding if OpenAI unavailable)
+    enricher = StyleEnricher(use_clip=False)  # Don't need CLIP for text
+    print("✅ Text enricher initialized (fallback)")
 
 @app.route('/api/health', methods=['GET'])
 def health():
@@ -64,7 +148,11 @@ def health():
     return jsonify({
         'status': 'healthy',
         'products_loaded': len(products_df) if products_df is not None else 0,
-        'embeddings_loaded': len(embeddings_dict) if embeddings_dict else 0
+        'embeddings_loaded': len(embeddings_dict) if embeddings_dict else 0,
+        'openai_available': openai_embedder is not None,
+        'fashion_clip_available': fashion_clip_enricher is not None,
+        'pinecone_available': pinecone_index is not None,
+        'conversation_sessions': len(conversation_manager.conversations)
     })
 
 @app.route('/api/products', methods=['GET'])
@@ -179,37 +267,671 @@ def search_products():
         'count': len(results)
     })
 
+def handle_variants_query(referenced_product: Dict, query_text: str, top_k: int = 10) -> pd.DataFrame:
+    """
+    Handle variants query - find products with same base but different attributes.
+    
+    Args:
+        referenced_product: The product being referenced
+        query_text: User query text
+        top_k: Number of results to return
+        
+    Returns:
+        DataFrame with variant products
+    """
+    global products_df, openai_embedder, embeddings_dict, pinecone_index
+    
+    if products_df is None or products_df.empty:
+        return pd.DataFrame()
+    
+    ref_idx = referenced_product.get('index')
+    if ref_idx is None:
+        print(f"⚠️  Variants query: Product index not found in reference")
+        return pd.DataFrame()
+    
+    # Validate and convert index
+    try:
+        ref_idx = int(ref_idx)
+    except (ValueError, TypeError) as e:
+        print(f"⚠️  Variants query: Invalid product index '{ref_idx}': {e}")
+        return pd.DataFrame()
+    
+    # Check bounds
+    if ref_idx < 0 or ref_idx >= len(products_df):
+        print(f"⚠️  Variants query: Product index {ref_idx} out of bounds (0-{len(products_df)-1})")
+        return pd.DataFrame()
+    
+    try:
+        ref_product = products_df.iloc[ref_idx]
+    except (IndexError, KeyError) as e:
+        print(f"⚠️  Variants query: Error accessing product at index {ref_idx}: {e}")
+        return pd.DataFrame()
+    
+    # Extract variant criteria from query
+    query_lower = query_text.lower()
+    variant_type = None
+    if 'color' in query_lower:
+        variant_type = 'color'
+    elif 'size' in query_lower:
+        variant_type = 'size'
+    elif 'material' in query_lower or 'fabric' in query_lower:
+        variant_type = 'material'
+    
+    # Start with products in same category
+    results_df = products_df[products_df['category'] == ref_product.get('category', '')].copy()
+    
+    # IMPORTANT: Maintain gender filter from referenced product
+    # If the referenced product has gender, use it; otherwise check if it was passed in the product data
+    ref_gender = ref_product.get('gender') if pd.notna(ref_product.get('gender')) else referenced_product.get('gender')
+    if ref_gender:
+        results_df = results_df[results_df['gender'] == ref_gender]
+        print(f"✅ Maintained gender filter from referenced product: {ref_gender}")
+    
+    # Exclude the reference product
+    results_df = results_df[results_df.index != ref_idx]
+    
+    # If looking for color variants, try to find products with similar name base
+    if variant_type == 'color':
+        # Extract base name (remove color words)
+        ref_name = str(ref_product.get('name', '')).lower()
+        # Try to find products with similar names but different colors
+        # Use semantic search to find similar products
+        if openai_embedder:
+            ref_desc = str(ref_product.get('description', '') or ref_product.get('name', ''))
+            ref_emb = openai_embedder.get_embedding(ref_desc)
+            
+            if ref_emb is not None and not results_df.empty:
+                # Find similar products using embeddings
+                similarities = []
+                for idx, row in results_df.iterrows():
+                    product_desc = str(row.get('description', '') or row.get('name', ''))
+                    if product_desc:
+                        product_emb = openai_embedder.get_embedding(product_desc)
+                        if product_emb is not None:
+                            similarity = np.dot(ref_emb, product_emb) / (
+                                np.linalg.norm(ref_emb) * np.linalg.norm(product_emb)
+                            )
+                            similarities.append((idx, similarity))
+                
+                if similarities:
+                    similarities.sort(key=lambda x: x[1], reverse=True)
+                    sorted_indices = [idx for idx, _ in similarities[:top_k]]
+                    results_df = products_df.loc[sorted_indices]
+    
+    return results_df.head(top_k)
+
+
+def handle_similar_products_query(referenced_product: Dict, query_text: str, top_k: int = 10) -> pd.DataFrame:
+    """
+    Handle similar products query - find products similar to referenced product.
+    
+    Args:
+        referenced_product: The product being referenced
+        query_text: User query text
+        top_k: Number of results to return
+        
+    Returns:
+        DataFrame with similar products
+    """
+    global products_df, openai_embedder, embeddings_dict, pinecone_index
+    
+    if products_df is None or products_df.empty:
+        return pd.DataFrame()
+    
+    ref_idx = referenced_product.get('index')
+    if ref_idx is None:
+        print(f"⚠️  Similar products query: Product index not found in reference")
+        return pd.DataFrame()
+    
+    # Validate and convert index
+    try:
+        ref_idx = int(ref_idx)
+    except (ValueError, TypeError) as e:
+        print(f"⚠️  Similar products query: Invalid product index '{ref_idx}': {e}")
+        return pd.DataFrame()
+    
+    # Check bounds
+    if ref_idx < 0 or ref_idx >= len(products_df):
+        print(f"⚠️  Similar products query: Product index {ref_idx} out of bounds (0-{len(products_df)-1})")
+        return pd.DataFrame()
+    
+    try:
+        ref_product = products_df.iloc[ref_idx]
+    except (IndexError, KeyError) as e:
+        print(f"⚠️  Similar products query: Error accessing product at index {ref_idx}: {e}")
+        return pd.DataFrame()
+    
+    # IMPORTANT: Get gender from referenced product to maintain context
+    ref_gender = ref_product.get('gender') if pd.notna(ref_product.get('gender')) else referenced_product.get('gender')
+    
+    # Get reference product embedding
+    ref_emb = None
+    if openai_embedder:
+        description = str(ref_product.get('description', '') or ref_product.get('name', ''))
+        if description:
+            ref_emb = openai_embedder.get_embedding(description)
+    
+    if ref_emb is None:
+        # Fallback to stored embeddings
+        ref_id = f"{ref_product.get('name', ref_idx)}_{ref_idx}"
+        ref_emb_key = f"{ref_id}_text"
+        if ref_emb_key in embeddings_dict:
+            ref_emb = np.array(embeddings_dict[ref_emb_key])
+    
+    if ref_emb is None:
+        return pd.DataFrame()
+    
+    # Extract product type from query if specified
+    query_lower = query_text.lower()
+    product_type_filter = None
+    parsed = query_parser.parse_situational_query(query_text)
+    if parsed.get('product_type'):
+        product_type_filter = parsed['product_type']
+    
+    # Filter by product type if specified
+    results_df = products_df.copy()
+    if product_type_filter:
+        type_mask = results_df['category'].astype(str).str.lower().str.contains(product_type_filter, na=False) | \
+                   results_df['name'].astype(str).str.lower().str.contains(product_type_filter, na=False)
+        results_df = results_df[type_mask]
+    
+    # IMPORTANT: Apply gender filter from referenced product
+    if ref_gender:
+        results_df = results_df[results_df['gender'] == ref_gender]
+        print(f"✅ Maintained gender filter from referenced product: {ref_gender}")
+    
+    # Exclude reference product
+    results_df = results_df[results_df.index != ref_idx]
+    
+    if results_df.empty:
+        return pd.DataFrame()
+    
+    # Find similar products using semantic search
+    if pinecone_index:
+        try:
+            filter_dict = {"product_id": {"$ne": int(ref_idx)}}
+            if product_type_filter:
+                # Could add category filter here if needed
+                pass
+            
+            results = pinecone_index.query(
+                vector=ref_emb.tolist(),
+                top_k=top_k + 1,
+                include_metadata=True,
+                filter=filter_dict
+            )
+            
+            similar_indices = []
+            for match in results.matches:
+                product_id = match.metadata.get('product_id')
+                if product_id and product_id != ref_idx:
+                    try:
+                        if int(product_id) in results_df.index:
+                            similar_indices.append(int(product_id))
+                    except (ValueError, IndexError):
+                        continue
+            
+            if similar_indices:
+                return products_df.loc[similar_indices].head(top_k)
+        except Exception as e:
+            print(f"⚠️  Pinecone similar search error: {e}, falling back to local")
+    
+    # Fallback to local search
+    similarities = []
+    for idx, row in results_df.iterrows():
+        product_id_str = f"{row.get('name', idx)}_{idx}"
+        emb_key = f"{product_id_str}_text"
+        
+        if emb_key in embeddings_dict:
+            product_emb = np.array(embeddings_dict[emb_key])
+            similarity = np.dot(ref_emb, product_emb) / (
+                np.linalg.norm(ref_emb) * np.linalg.norm(product_emb)
+            )
+            similarities.append((idx, similarity))
+    
+    if similarities:
+        similarities.sort(key=lambda x: x[1], reverse=True)
+        sorted_indices = [idx for idx, _ in similarities[:top_k]]
+        return products_df.loc[sorted_indices].head(top_k)
+    
+    return pd.DataFrame()
+
+
 @app.route('/api/query', methods=['POST'])
 def handle_query():
     """
     Handle natural language queries about products.
-    Combines semantic search with attribute filtering.
+    Combines semantic search with attribute filtering, conversation memory, and style embeddings.
     
     Request body:
     {
         "query": "show me wool sweaters under $200",
-        "top_k": 10
+        "top_k": 10,
+        "session_id": "session_123",
+        "use_visual": false,
+        "image_embedding": null
     }
     """
+    global products_df, embeddings_dict, openai_embedder, enricher, conversation_manager
+    global query_parser, pinecone_index
+    
     if products_df is None or products_df.empty:
         return jsonify({'error': 'No products loaded'}), 404
     
     data = request.get_json()
     query_text = data.get('query', '')
     top_k = data.get('top_k', 10)
+    session_id = data.get('session_id', 'default')
+    use_visual = data.get('use_visual', False)
+    image_embedding = data.get('image_embedding')
+    tagged_products_data = data.get('tagged_products', [])
+    ui_gender = data.get('gender', 'all')  # From UI toggle
     
-    if not query_text:
-        return jsonify({'error': 'Query text required'}), 400
+    # Store tagged products in conversation manager
+    if tagged_products_data:
+        for product_data in tagged_products_data:
+            conversation_manager.add_tagged_product(session_id, product_data)
+    
+    if not query_text and not image_embedding:
+        return jsonify({'error': 'Query text or image required'}), 400
+    
+    # Get tagged products from conversation manager
+    tagged_products = conversation_manager.get_tagged_products(session_id)
+    
+    # Check for product references in query
+    product_reference = None
+    if query_text:
+        product_reference = query_parser.detect_product_reference(query_text, tagged_products)
+    
+    # Parse query for situational components (including gender)
+    parsed_components = {}
+    if query_text:
+        parsed_components = query_parser.parse_situational_query(query_text)
+    
+    # Determine gender filter: prefer query text gender over UI toggle
+    gender_filter = None
+    if parsed_components.get('gender'):
+        gender_filter = parsed_components['gender']  # Query text gender takes priority
+    elif ui_gender and ui_gender != 'all':
+        gender_filter = ui_gender  # Fallback to UI toggle
+    
+    # Apply gender filter EARLY, before semantic search
+    results_df = products_df.copy()
+    if gender_filter and 'gender' in results_df.columns:
+        results_df = results_df[results_df['gender'] == gender_filter]
+        print(f"✅ Applied gender filter: {gender_filter} ({len(results_df)} products)")
+    
+    # If product reference found, classify intent and handle accordingly
+    if product_reference:
+        referenced_product = product_reference['referenced_product']
+        query_intent = query_parser.classify_product_query_intent(query_text, has_product_reference=True)
+        
+        if query_intent['intent'] == 'variants':
+            # Handle variants query
+            results_df = handle_variants_query(referenced_product, query_text, top_k)
+            # Include index in results
+            results_dict = []
+            if not results_df.empty:
+                for idx, row in results_df.iterrows():
+                    product_dict = row.replace({np.nan: None}).to_dict()
+                    product_dict['index'] = int(idx)  # Add index for frontend tagging
+                    results_dict.append(product_dict)
+            
+            conversation_manager.add_message(session_id, "user", query_text)
+            conversation_manager.add_message(
+                session_id,
+                "assistant",
+                f"Found {len(results_dict)} variant products",
+                metadata={"result_count": len(results_dict), "intent": "variants"}
+            )
+            
+            return jsonify({
+                'query': query_text,
+                'results': results_dict,
+                'count': len(results_dict),
+                'session_id': session_id,
+                'intent': 'variants',
+                'referenced_product': referenced_product
+            })
+        
+        elif query_intent['intent'] == 'similar':
+            # Handle similar products query
+            results_df = handle_similar_products_query(referenced_product, query_text, top_k)
+            # Include index in results
+            results_dict = []
+            if not results_df.empty:
+                for idx, row in results_df.iterrows():
+                    product_dict = row.replace({np.nan: None}).to_dict()
+                    product_dict['index'] = int(idx)  # Add index for frontend tagging
+                    results_dict.append(product_dict)
+            
+            conversation_manager.add_message(session_id, "user", query_text)
+            conversation_manager.add_message(
+                session_id,
+                "assistant",
+                f"Found {len(results_dict)} similar products",
+                metadata={"result_count": len(results_dict), "intent": "similar"}
+            )
+            
+            return jsonify({
+                'query': query_text,
+                'results': results_dict,
+                'count': len(results_dict),
+                'session_id': session_id,
+                'intent': 'similar',
+                'referenced_product': referenced_product
+            })
+        
+        elif query_intent['intent'] == 'compatibility':
+            # Handle compatibility query
+            ref_idx = referenced_product.get('index')
+            if ref_idx is None:
+                return jsonify({'error': 'Product index not found in reference'}), 400
+            
+            # Validate and convert index
+            try:
+                ref_idx = int(ref_idx)
+            except (ValueError, TypeError) as e:
+                return jsonify({'error': f'Invalid product index: {ref_idx}'}), 400
+            
+            # Check bounds
+            if ref_idx < 0 or ref_idx >= len(products_df):
+                return jsonify({'error': f'Product index {ref_idx} out of bounds'}), 404
+            
+            try:
+                # Extract compatible product type from query
+                parsed = query_parser.parse_situational_query(query_text)
+                compatible_type = parsed.get('product_type')
+                
+                # Get reference product
+                ref_product = products_df.iloc[ref_idx]
+                
+                # Get reference product embedding
+                ref_emb = None
+                if openai_embedder:
+                    description = str(ref_product.get('description', '') or ref_product.get('name', ''))
+                    if description:
+                        ref_emb = openai_embedder.get_embedding(description)
+                
+                if ref_emb is None:
+                    ref_id = f"{ref_product.get('name', ref_idx)}_{ref_idx}"
+                    ref_emb_key = f"{ref_id}_text"
+                    if ref_emb_key in embeddings_dict:
+                        ref_emb = np.array(embeddings_dict[ref_emb_key])
+                
+                if ref_emb is None:
+                    # Fall through to normal query
+                    pass
+                else:
+                    # Find compatible products
+                    compatible_products = []
+                    
+                    if pinecone_index:
+                        try:
+                            filter_dict = {"product_id": {"$ne": int(ref_idx)}}
+                            results = pinecone_index.query(
+                                vector=ref_emb.tolist(),
+                                top_k=top_k + 1,
+                                include_metadata=True,
+                                filter=filter_dict
+                            )
+                            
+                            for match in results.matches:
+                                product_id = match.metadata.get('product_id')
+                                if product_id and product_id != ref_idx:
+                                    try:
+                                        product_row = products_df.iloc[int(product_id)]
+                                        # Filter by gender from referenced product
+                                        ref_gender = ref_product.get('gender')
+                                        if ref_gender and pd.notna(ref_gender):
+                                            if product_row.get('gender') != ref_gender:
+                                                continue
+                                        # Filter by compatible product type if specified
+                                        if compatible_type:
+                                            category = str(product_row.get('category', '')).lower()
+                                            name = str(product_row.get('name', '')).lower()
+                                            if compatible_type not in category and compatible_type not in name:
+                                                continue
+                                        compatible_products.append(product_row.replace({np.nan: None}).to_dict())
+                                    except (IndexError, KeyError):
+                                        continue
+                        except Exception as e:
+                            print(f"⚠️  Pinecone compatibility search error: {e}, falling back to local")
+                    
+                    # Fallback to local search
+                    if not compatible_products:
+                        similarities = []
+                        for idx, row in products_df.iterrows():
+                            if idx == ref_idx:
+                                continue
+                            
+                            # Filter by gender from referenced product
+                            ref_gender = ref_product.get('gender')
+                            if ref_gender and pd.notna(ref_gender):
+                                if row.get('gender') != ref_gender:
+                                    continue
+                            
+                            # Filter by compatible product type if specified
+                            if compatible_type:
+                                category = str(row.get('category', '')).lower()
+                                name = str(row.get('name', '')).lower()
+                                if compatible_type not in category and compatible_type not in name:
+                                    continue
+                            
+                            product_id_str = f"{row.get('name', idx)}_{idx}"
+                            emb_key = f"{product_id_str}_text"
+                            
+                            if emb_key in embeddings_dict:
+                                product_emb = np.array(embeddings_dict[emb_key])
+                                similarity = np.dot(ref_emb, product_emb) / (
+                                    np.linalg.norm(ref_emb) * np.linalg.norm(product_emb)
+                                )
+                                similarities.append((idx, similarity, row))
+                        
+                        if similarities:
+                            similarities.sort(key=lambda x: x[1], reverse=True)
+                            compatible_products = [
+                                row.replace({np.nan: None}).to_dict()
+                                for _, _, row in similarities[:top_k]
+                            ]
+                    
+                    conversation_manager.add_message(session_id, "user", query_text)
+                    conversation_manager.add_message(
+                        session_id,
+                        "assistant",
+                        f"Found {len(compatible_products)} compatible products",
+                        metadata={"result_count": len(compatible_products), "intent": "compatibility"}
+                    )
+                    
+                    return jsonify({
+                        'query': query_text,
+                        'results': compatible_products[:top_k],
+                        'count': len(compatible_products[:top_k]),
+                        'session_id': session_id,
+                        'intent': 'compatibility',
+                        'referenced_product': referenced_product
+                    })
+            except Exception as e:
+                print(f"⚠️  Compatibility query error: {e}")
+                import traceback
+                traceback.print_exc()
+                # Return proper error response instead of falling through
+                return jsonify({
+                    'error': f'Error processing compatibility query: {str(e)}',
+                    'query': query_text,
+                    'session_id': session_id
+                }), 500
+    
+    # Get conversation context and user preferences
+    context = conversation_manager.get_context(session_id, max_messages=5)
+    recent_queries = conversation_manager.get_recent_queries(session_id, n=3)
+    last_query_context = conversation_manager.get_last_query_context(session_id)
+    user_preferences = conversation_manager.infer_preferences_from_history(session_id)
+    
+    # Detect if current query is a correction or refinement
+    is_correction = False
+    query_intent = 'new'
+    if query_text and last_query_context:
+        is_correction = conversation_manager.is_correction_query(query_text)
+        if is_correction:
+            query_intent = 'correction'
+        else:
+            # Check for other intents
+            intent_result = query_parser.detect_query_intent(query_text, last_query_context)
+            query_intent = intent_result.get('intent', 'new')
+    
+    # Merge contexts if it's a follow-up or correction
+    if is_correction and last_query_context:
+        # Use merge_query_context to combine contexts
+        merged_context = query_parser.merge_query_context(query_text, last_query_context, query_intent)
+        print(f"🔄 Merged context for correction: {merged_context}")
+        # Use merged context for search
+        query_text_for_search = merged_context.get('query_text', query_text)
+        parsed_components_for_search = merged_context.get('parsed_components', {})
+        gender_filter_for_search = merged_context.get('applied_filters', {}).get('gender', gender_filter)
+    else:
+        query_text_for_search = query_text
+        parsed_components_for_search = parsed_components
+        gender_filter_for_search = gender_filter
+    
+    # Check if this is a gender-only query
+    query_lower_search = query_text_for_search.lower() if query_text_for_search else ""
+    is_gender_only_query = query_lower_search in ['for men', 'for women', 'men', 'women', 'mens', 'womens']
+    
+    # Detect follow-up queries (only if we have query text)
+    follow_up_words = ['that', 'this', 'it', 'more', 'similar', 'like', 'those', 'them', 'for men', 'for women', 'in men', 'in women']
+    is_follow_up = query_text_for_search and any(word in query_text_for_search.lower() for word in follow_up_words) and context
+    
+    # Enhance query with context if follow-up or gender-only query
+    if (is_follow_up or is_gender_only_query) and context and last_query_context:
+        # For gender-only queries, reconstruct the query with context
+        if is_gender_only_query:
+            last_query_text = last_query_context.get('query_text', '')
+            # Remove any gender from the last query and add the new gender
+            enhanced_query = f"{last_query_text} {query_text_for_search}"
+        else:
+            enhanced_query = f"Context: {context}\n\nUser query: {query_text_for_search}"
+    else:
+        enhanced_query = query_text_for_search or ""
+    
+    # Parse query for situational components (only if we have query text) - use merged if available
+    if not parsed_components_for_search and query_text_for_search:
+        parsed_components_for_search = query_parser.parse_situational_query(enhanced_query)
+    
+    # Update gender filter if merged context has it
+    if parsed_components_for_search.get('gender') and not gender_filter_for_search:
+        gender_filter_for_search = parsed_components_for_search['gender']
+        # Re-apply gender filter
+        if gender_filter_for_search and 'gender' in results_df.columns:
+            results_df = results_df[results_df['gender'] == gender_filter_for_search]
+            print(f"✅ Applied gender filter from merged context: {gender_filter_for_search} ({len(results_df)} products)")
+    
+    # Get text embedding (with style enhancement) - use merged components if available
+    text_emb = None
+    if query_text_for_search:
+        if openai_embedder:
+            # Use style-enhanced embedding with parsed components (merged if correction)
+            text_emb = get_style_embedding_query(enhanced_query, openai_embedder, parsed_components_for_search)
+        else:
+            # Fallback to sentence-transformers
+            text_emb = enricher.get_text_embedding(enhanced_query)
+    
+    # Get visual embedding (if provided)
+    visual_emb = None
+    if image_embedding:
+        visual_emb = np.array(image_embedding)
+    elif use_visual:
+        # Could retrieve from session if stored
+        pass
+    
+    # Determine which embedding to use for search
+    query_emb = None
+    if text_emb is not None and visual_emb is not None:
+        # Hybrid: prefer text for now (could combine)
+        query_emb = text_emb
+    elif visual_emb is not None:
+        query_emb = visual_emb
+    elif text_emb is not None:
+        query_emb = text_emb
+    else:
+        return jsonify({'error': 'Failed to generate query embedding'}), 500
+    
+    # Helper function for semantic search (Pinecone or local)
+    def perform_semantic_search(query_embedding, product_indices=None, top_k=10):
+        """
+        Perform semantic search using Pinecone or local embeddings.
+        
+        Args:
+            query_embedding: Query embedding vector
+            product_indices: Optional list of product indices to search (for filtering)
+            top_k: Number of results to return
+            
+        Returns:
+            List of (index, similarity) tuples sorted by similarity
+        """
+        if pinecone_index and query_embedding is not None:
+            try:
+                # Use Pinecone for search
+                filter_dict = None
+                if product_indices:
+                    # Filter by product IDs in Pinecone
+                    filter_dict = {"product_id": {"$in": [int(idx) for idx in product_indices]}}
+                
+                results = pinecone_index.query(
+                    vector=query_embedding.tolist(),
+                    top_k=min(top_k * 2, 100),  # Get more results for filtering
+                    include_metadata=True,
+                    filter=filter_dict
+                )
+                
+                # Map Pinecone results back to DataFrame indices
+                similarities = []
+                for match in results.matches:
+                    product_id = match.metadata.get('product_id')
+                    if product_id is not None:
+                        idx = int(product_id)
+                        if product_indices is None or idx in product_indices:
+                            similarities.append((idx, float(match.score)))
+                
+                return similarities
+            except Exception as e:
+                print(f"⚠️  Pinecone search error: {e}, falling back to local search")
+        
+        # Fallback to local search
+        if query_embedding is None or (not embeddings_dict and not pinecone_index):
+            return []
+        
+        similarities = []
+        search_indices = product_indices if product_indices else products_df.index
+        
+        for idx in search_indices:
+            if idx not in products_df.index:
+                continue
+            row = products_df.loc[idx]
+            product_id = f"{row.get('name', idx)}_{idx}"
+            emb_key = f"{product_id}_text"
+            
+            if emb_key in embeddings_dict:
+                product_emb = np.array(embeddings_dict[emb_key])
+                similarity = np.dot(query_embedding, product_emb) / (
+                    np.linalg.norm(query_embedding) * np.linalg.norm(product_emb)
+                )
+                similarities.append((idx, similarity))
+        
+        return similarities
     
     # Simple keyword-based filtering (can be enhanced with NLP)
-    query_lower = query_text.lower()
+    query_lower = query_text.lower() if query_text else ""
+    
+    # Check if this is a gender-only query (using original query text)
+    is_gender_only_query_check = query_lower in ['for men', 'for women', 'men', 'women', 'mens', 'womens']
     
     # Early check: Does this query imply a product search?
     # If not, return empty results immediately
     product_action_words = ['show', 'find', 'search', 'look', 'get', 'buy', 'want', 'need',
                            'see', 'display', 'list', 'recommend', 'suggest', 'give me',
                            'i want', 'i need', 'i\'m looking for', 'looking for', 'what',
-                           'which', 'where can i']
+                           'which', 'where can i', 'for men', 'for women']
     
     product_type_words = ['sweater', 'cardigan', 'shirt', 'pants', 'trousers', 'jacket', 
                          'coat', 'scarf', 'vest', 'sock', 'glove', 'hoodie', 'top', 'polo',
@@ -231,12 +953,23 @@ def handle_query():
     
     # Query implies product search if it has product-related content
     # Allow queries with just attributes (e.g., "black wool") as they're clearly product searches
+    # Also allow style/situational queries (e.g., "night out in paris") even without explicit product type
+    has_style_context = parsed_components_for_search and (
+        parsed_components_for_search.get('location') or 
+        parsed_components_for_search.get('occasion') or 
+        parsed_components_for_search.get('weather') or 
+        parsed_components_for_search.get('season') or
+        parsed_components_for_search.get('style_keywords')
+    )
+    
     implies_product_search = (
         has_product_type or  # Has a product type
         (has_action_word and (has_attribute or has_price)) or  # Action + attribute/price
         (has_attribute and has_price) or  # Attribute + price
         has_attribute or  # Just attributes (e.g., "black wool", "minimalist classic")
-        (len([x for x in [has_action_word, has_product_type, has_attribute, has_price] if x]) >= 2)
+        has_style_context or  # Has style/situational context (e.g., "night out in paris")
+        (len([x for x in [has_action_word, has_product_type, has_attribute, has_price] if x]) >= 2) or
+        (is_gender_only_query_check and context)  # Gender-only queries with context
     )
     
     # If query doesn't imply product search, return empty immediately
@@ -244,13 +977,22 @@ def handle_query():
         return jsonify({
             'query': query_text,
             'results': [],
-            'count': 0
+            'count': 0,
+            'session_id': session_id,
+            'used_style_context': False,
+            'parsed_components': parsed_components
         })
     
-    # Start with all products
-    results_df = products_df.copy()
+    # Start with all products (or filtered by gender if already applied)
+    # Use gender_filter_for_search which may have been updated by merged context
+    if gender_filter_for_search and 'gender' in products_df.columns:
+        results_df = products_df[products_df['gender'] == gender_filter_for_search].copy()
+        print(f"✅ Applied gender filter: {gender_filter_for_search} ({len(results_df)} products)")
+    else:
+        results_df = products_df.copy()
     
     # Detect "only" keyword - this enforces strict filtering
+    query_lower = query_text_for_search.lower() if query_text_for_search else ""
     strict_mode = 'only' in query_lower or 'just' in query_lower
     
     # Filter by product type (scarf, vest, sock, t-shirt, glove, etc.)
@@ -605,31 +1347,81 @@ def handle_query():
         'strict': strict_mode
     }
     
-    # If we have embeddings and filtered results, do semantic search ONLY on filtered results
-    if embeddings_dict and enricher and not results_df.empty:
-        query_emb = enricher.get_text_embedding(query_text)
-        if query_emb is not None:
-            # Compute semantic similarities ONLY for filtered products
-            similarities = []
-            for idx in results_df.index:
-                row = results_df.loc[idx]
-                product_id = f"{row.get('name', idx)}_{idx}"
-                emb_key = f"{product_id}_text"
-                
-                if emb_key in embeddings_dict:
-                    product_emb = np.array(embeddings_dict[emb_key])
-                    similarity = np.dot(query_emb, product_emb) / (
-                        np.linalg.norm(query_emb) * np.linalg.norm(product_emb)
-                    )
-                    similarities.append((idx, similarity))
+    # Helper function for semantic search (Pinecone or local)
+    def perform_semantic_search(query_embedding, product_indices=None, top_k=10):
+        """
+        Perform semantic search using Pinecone or local embeddings.
+        
+        Args:
+            query_embedding: Query embedding vector
+            product_indices: Optional list of product indices to search (for filtering)
+            top_k: Number of results to return
             
-            # Sort by similarity and reorder results
-            if similarities:
-                similarities.sort(key=lambda x: x[1], reverse=True)
-                sorted_indices = [idx for idx, _ in similarities]
-                # Reorder results_df by similarity
-                results_df = results_df.loc[sorted_indices]
-            # If no similarities found, keep the filtered results as-is (they're already filtered correctly)
+        Returns:
+            List of (index, similarity) tuples sorted by similarity
+        """
+        if pinecone_index and query_embedding is not None:
+            try:
+                # Use Pinecone for search
+                filter_dict = None
+                if product_indices:
+                    # Filter by product IDs in Pinecone
+                    filter_dict = {"product_id": {"$in": [int(idx) for idx in product_indices]}}
+                
+                results = pinecone_index.query(
+                    vector=query_embedding.tolist(),
+                    top_k=min(top_k * 2, 100),  # Get more results for filtering
+                    include_metadata=True,
+                    filter=filter_dict
+                )
+                
+                # Map Pinecone results back to DataFrame indices
+                similarities = []
+                for match in results.matches:
+                    product_id = match.metadata.get('product_id')
+                    if product_id is not None:
+                        idx = int(product_id)
+                        if product_indices is None or idx in product_indices:
+                            similarities.append((idx, float(match.score)))
+                
+                return similarities
+            except Exception as e:
+                print(f"⚠️  Pinecone search error: {e}, falling back to local search")
+        
+        # Fallback to local search
+        if query_embedding is None or (not embeddings_dict and not pinecone_index):
+            return []
+        
+        similarities = []
+        search_indices = product_indices if product_indices else products_df.index
+        
+        for idx in search_indices:
+            if idx not in products_df.index:
+                continue
+            row = products_df.loc[idx]
+            product_id = f"{row.get('name', idx)}_{idx}"
+            emb_key = f"{product_id}_text"
+            
+            if emb_key in embeddings_dict:
+                product_emb = np.array(embeddings_dict[emb_key])
+                similarity = np.dot(query_emb, product_emb) / (
+                    np.linalg.norm(query_emb) * np.linalg.norm(product_emb)
+                )
+                similarities.append((idx, similarity))
+        
+        return similarities
+    
+    # If we have embeddings and filtered results, do semantic search ONLY on filtered results
+    if query_emb is not None and not results_df.empty:
+        similarities = perform_semantic_search(query_emb, product_indices=results_df.index.tolist(), top_k=top_k)
+        
+        # Sort by similarity and reorder results
+        if similarities:
+            similarities.sort(key=lambda x: x[1], reverse=True)
+            sorted_indices = [idx for idx, _ in similarities[:top_k]]
+            # Reorder results_df by similarity
+            results_df = results_df.loc[sorted_indices] if sorted_indices else results_df.head(top_k)
+        # If no similarities found, keep the filtered results as-is (they're already filtered correctly)
     
     # If results are empty BUT filters were applied, reapply filters and use semantic search on filtered set
     elif embeddings_dict and enricher and results_df.empty and any(filters_applied.values()):
@@ -744,32 +1536,19 @@ def handle_query():
                         filtered_df = filtered_df[~exclude_mask]
         
         # Now do semantic search ONLY on the filtered set (respecting all filters)
-        if not filtered_df.empty:
-            query_emb = enricher.get_text_embedding(query_text)
-            if query_emb is not None:
-                similarities = []
-                for idx in filtered_df.index:
-                    row = filtered_df.loc[idx]
-                    product_id = f"{row.get('name', idx)}_{idx}"
-                    emb_key = f"{product_id}_text"
-                    
-                    if emb_key in embeddings_dict:
-                        product_emb = np.array(embeddings_dict[emb_key])
-                        similarity = np.dot(query_emb, product_emb) / (
-                            np.linalg.norm(query_emb) * np.linalg.norm(product_emb)
-                        )
-                        similarities.append((idx, similarity))
-                
-                if similarities:
-                    similarities.sort(key=lambda x: x[1], reverse=True)
-                    semantic_indices = [idx for idx, _ in similarities[:top_k]]
-                    results_df = filtered_df.loc[semantic_indices]
-                else:
-                    # No embeddings found, just use filtered results
-                    results_df = filtered_df.head(top_k)
+        if not filtered_df.empty and query_emb is not None:
+            similarities = perform_semantic_search(query_emb, product_indices=filtered_df.index.tolist(), top_k=top_k)
+            
+            if similarities:
+                similarities.sort(key=lambda x: x[1], reverse=True)
+                semantic_indices = [idx for idx, _ in similarities[:top_k]]
+                results_df = filtered_df.loc[semantic_indices] if semantic_indices else filtered_df.head(top_k)
             else:
-                # Couldn't encode query, just use filtered results
+                # No embeddings found, just use filtered results
                 results_df = filtered_df.head(top_k)
+        elif not filtered_df.empty:
+            # Couldn't encode query, just use filtered results
+            results_df = filtered_df.head(top_k)
         else:
             # Filtered set is empty, return empty results (don't fall back to all products)
             # In strict mode, this is expected - return empty
@@ -872,13 +1651,59 @@ def handle_query():
     # Limit results
     results_df = results_df.head(top_k)
     
-    # Replace NaN with None for JSON serialization
-    results_dict = results_df.replace({np.nan: None}).to_dict('records')
+    # Replace NaN with None for JSON serialization and include index
+    results_dict = []
+    for idx, row in results_df.iterrows():
+        product_dict = row.replace({np.nan: None}).to_dict()
+        product_dict['index'] = int(idx)  # Add index for frontend tagging
+        results_dict.append(product_dict)
+    
+    # Store in conversation with full context (use merged context if correction)
+    conversation_manager.add_message(
+        session_id, 
+        "user", 
+        query_text,
+        metadata={
+            "parsed_components": parsed_components_for_search,
+            "applied_filters": {
+                "gender": gender_filter_for_search,
+                "product_type": parsed_components_for_search.get('product_type'),
+                "color": None,  # Could extract from query
+                "material": None,  # Could extract from query
+                "price_max": None  # Could extract from query
+            },
+            "result_count": len(results_dict),
+            "is_correction": is_correction,
+            "query_intent": query_intent
+        }
+    )
+    conversation_manager.add_message(
+        session_id, 
+        "assistant", 
+        f"Found {len(results_df)} products",
+        metadata={"result_count": len(results_df)}
+    )
+    
+    # Add personalized recommendations if no query but preferences exist
+    personalized_message = None
+    if not query_text and user_preferences and not results_dict:
+        # Generate personalized recommendations
+        if user_preferences.get('favorite_colors'):
+            color = user_preferences['favorite_colors'][0]
+            personalized_message = f"Based on your style, you might like these {color} items:"
+        elif user_preferences.get('preferred_categories'):
+            category = user_preferences['preferred_categories'][0]
+            personalized_message = f"Here are some new {category} you might enjoy:"
     
     return jsonify({
         'query': query_text,
         'results': results_dict,
-        'count': len(results_df)
+        'count': len(results_df),
+        'session_id': session_id,
+        'used_style_context': extract_style_context(query_text) is not None if query_text else False,
+        'parsed_components': parsed_components,
+        'user_preferences': user_preferences,
+        'personalized_message': personalized_message
     })
 
 @app.route('/api/color-matches', methods=['GET'])
@@ -911,6 +1736,197 @@ def get_color_matches():
     color_matches = enricher.get_color_matches(color_list)
     
     return jsonify(color_matches)
+
+@app.route('/api/compatibility', methods=['POST'])
+def get_compatible_products():
+    """Find products that go well with a given product."""
+    global products_df, embeddings_dict, openai_embedder, pinecone_index
+    
+    data = request.get_json()
+    product_id = data.get('product_id')  # Index or name
+    compatibility_type = data.get('type', 'style')  # 'style', 'color', 'hybrid'
+    top_k = data.get('top_k', 5)
+    
+    if products_df is None or products_df.empty:
+        return jsonify({'error': 'No products loaded'}), 404
+    
+    # Get reference product
+    try:
+        if isinstance(product_id, int) or (isinstance(product_id, str) and product_id.isdigit()):
+            ref_product = products_df.iloc[int(product_id)]
+            ref_idx = int(product_id)
+        else:
+            ref_product = products_df[products_df['name'] == product_id].iloc[0]
+            ref_idx = ref_product.name
+    except (IndexError, KeyError):
+        return jsonify({'error': 'Product not found'}), 404
+    
+    # Get reference product embedding
+    ref_emb = None
+    
+    # Try OpenAI text embedding first
+    if openai_embedder:
+        description = str(ref_product.get('description', '') or ref_product.get('name', ''))
+        if description and len(description) > 10:
+            ref_emb = openai_embedder.get_embedding(description)
+    
+    # Fallback to stored embeddings
+    if ref_emb is None:
+        ref_id = f"{ref_product.get('name', ref_idx)}_{ref_idx}"
+        ref_emb_key = f"{ref_id}_text"
+        if ref_emb_key in embeddings_dict:
+            ref_emb = np.array(embeddings_dict[ref_emb_key])
+        else:
+            ref_emb_key = f"{ref_id}_visual"
+            if ref_emb_key in embeddings_dict:
+                ref_emb = np.array(embeddings_dict[ref_emb_key])
+    
+    if ref_emb is None:
+        return jsonify({'error': 'Product embedding not found'}), 404
+    
+    # Find similar products using Pinecone or local search
+    if pinecone_index:
+        try:
+            results = pinecone_index.query(
+                vector=ref_emb.tolist(),
+                top_k=top_k + 1,  # +1 to exclude the reference product
+                include_metadata=True,
+                filter={"product_id": {"$ne": int(ref_idx)}}  # Exclude reference
+            )
+            
+            compatible_products = []
+            for match in results.matches:
+                product_id_from_meta = match.metadata.get('product_id')
+                if product_id_from_meta and product_id_from_meta != ref_idx:
+                    try:
+                        product_row = products_df.iloc[int(product_id_from_meta)]
+                        # Filter by gender from reference product
+                        ref_gender = ref_product.get('gender')
+                        if ref_gender and pd.notna(ref_gender):
+                            if product_row.get('gender') != ref_gender:
+                                continue
+                        compatible_products.append(product_row.replace({np.nan: None}).to_dict())
+                    except (IndexError, KeyError):
+                        continue
+            
+            return jsonify({
+                'reference_product': ref_product.replace({np.nan: None}).to_dict(),
+                'compatible_products': compatible_products[:top_k],
+                'type': compatibility_type
+            })
+        except Exception as e:
+            print(f"⚠️  Pinecone compatibility search error: {e}, falling back to local")
+    
+    # Fallback to local search
+    similarities = []
+    for idx, row in products_df.iterrows():
+        if idx == ref_idx:
+            continue
+        
+        product_id_str = f"{row.get('name', idx)}_{idx}"
+        
+        # Try text embedding
+        product_emb = None
+        emb_key = f"{product_id_str}_text"
+        if emb_key in embeddings_dict:
+            product_emb = np.array(embeddings_dict[emb_key])
+        else:
+            emb_key = f"{product_id_str}_visual"
+            if emb_key in embeddings_dict:
+                product_emb = np.array(embeddings_dict[emb_key])
+        
+        if product_emb is not None:
+            similarity = np.dot(ref_emb, product_emb) / (
+                np.linalg.norm(ref_emb) * np.linalg.norm(product_emb)
+            )
+            similarities.append((idx, similarity, row))
+    
+    # Sort and return
+    similarities.sort(key=lambda x: x[1], reverse=True)
+    results = []
+    ref_gender = ref_product.get('gender')
+    for _, _, row in similarities:
+        # Filter by gender from reference product
+        if ref_gender and pd.notna(ref_gender):
+            if row.get('gender') != ref_gender:
+                continue
+        results.append(row.replace({np.nan: None}).to_dict())
+        if len(results) >= top_k:
+            break
+    
+    return jsonify({
+        'reference_product': ref_product.replace({np.nan: None}).to_dict(),
+        'compatible_products': results,
+        'type': compatibility_type
+    })
+
+@app.route('/api/preferences/<session_id>', methods=['GET'])
+def get_preferences(session_id: str):
+    """Get user preferences for personalized recommendations."""
+    preferences = conversation_manager.infer_preferences_from_history(session_id)
+    stored_prefs = conversation_manager.get_user_preferences(session_id)
+    
+    # Merge inferred and stored preferences
+    all_preferences = {**preferences, **stored_prefs}
+    
+    return jsonify({
+        'session_id': session_id,
+        'preferences': all_preferences,
+        'tagged_products_count': len(conversation_manager.get_tagged_products(session_id)),
+        'conversation_length': len(conversation_manager.conversations.get(session_id, []))
+    })
+
+@app.route('/api/upload-image', methods=['POST'])
+def upload_image():
+    """Handle image upload from user for visual search."""
+    global fashion_clip_enricher
+    
+    try:
+        data = request.get_json()
+        image_data = data.get('image')  # Base64 encoded image
+        session_id = data.get('session_id', 'default')
+        
+        if not image_data:
+            return jsonify({'error': 'No image data provided'}), 400
+        
+        if not fashion_clip_enricher:
+            return jsonify({'error': 'Fashion CLIP not available'}), 503
+        
+        # Decode base64 image
+        if ',' in image_data:
+            image_data = image_data.split(',')[1]
+        image_bytes = base64.b64decode(image_data)
+        image = Image.open(BytesIO(image_bytes))
+        
+        # Convert to RGB if needed
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        
+        # Process image with Fashion CLIP
+        import torch
+        processed = fashion_clip_enricher.fashion_clip_processor(
+            images=[image],
+            padding='max_length',
+            return_tensors="pt"
+        )
+        pixel_values = processed['pixel_values'].to(fashion_clip_enricher.device)
+        
+        with torch.no_grad():
+            image_features = fashion_clip_enricher.fashion_clip_model.get_image_features(
+                pixel_values,
+                normalize=True
+            )
+            query_emb = image_features.cpu().numpy().flatten()
+        
+        return jsonify({
+            'status': 'success',
+            'embedding_dim': len(query_emb),
+            'embedding': query_emb.tolist(),  # Return embedding for client to use
+            'message': 'Image processed successfully'
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     print("🚀 Starting Shopping Assistant API...")

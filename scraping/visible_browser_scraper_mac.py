@@ -18,6 +18,68 @@ from typing import List, Dict, Optional
 
 load_dotenv()
 
+async def handle_thank_you_page(page, max_retries: int = 3) -> bool:
+    """
+    Detect and handle the "THANK YOU FOR YOUR PATIENCE" page by refreshing.
+    
+    Args:
+        page: Playwright page object
+        max_retries: Maximum number of refresh attempts
+        
+    Returns:
+        True if the page was detected and handled, False otherwise
+    """
+    try:
+        # Wait for page content to load
+        await page.wait_for_timeout(2000)
+        
+        # Check for the "THANK YOU FOR YOUR PATIENCE" message
+        page_text = await page.inner_text('body')
+        page_text_lower = page_text.lower()
+        
+        thank_you_indicators = [
+            'thank you for your patience',
+            'high interest in our latest collection',
+            'please try again by refreshing',
+            'check back soon'
+        ]
+        
+        is_thank_you_page = any(indicator in page_text_lower for indicator in thank_you_indicators)
+        
+        if is_thank_you_page:
+            print(f"      ⚠️  Detected 'THANK YOU FOR YOUR PATIENCE' page")
+            
+            # Try refreshing up to max_retries times
+            for retry in range(max_retries):
+                print(f"      🔄 Refreshing page (attempt {retry + 1}/{max_retries})...")
+                await page.reload(wait_until='domcontentloaded', timeout=45000)
+                await page.wait_for_timeout(3000)  # Wait for page to load
+                
+                # Check if we're still on the thank you page
+                page_text_after = await page.inner_text('body')
+                page_text_after_lower = page_text_after.lower()
+                
+                still_thank_you = any(indicator in page_text_after_lower for indicator in thank_you_indicators)
+                
+                if not still_thank_you:
+                    print(f"      ✅ Page refreshed successfully, no longer on thank you page")
+                    return True
+                
+                # Wait before next retry
+                if retry < max_retries - 1:
+                    wait_time = (retry + 1) * 2  # Exponential backoff: 2s, 4s, 6s
+                    print(f"      ⏳ Still on thank you page, waiting {wait_time}s before next retry...")
+                    await page.wait_for_timeout(wait_time * 1000)
+            
+            print(f"      ⚠️  Still on thank you page after {max_retries} refreshes, continuing anyway...")
+            return True  # Return True to indicate we tried to handle it
+        
+        return False  # Not a thank you page
+        
+    except Exception as e:
+        print(f"      ⚠️  Error checking for thank you page: {e}")
+        return False
+
 async def dismiss_popups(page):
     """Dismiss any pop-up modals that might block interaction - robust version."""
     max_attempts = 5
@@ -338,6 +400,9 @@ async def get_all_products_from_category(page, category_url: str, max_products: 
     
     await page.goto(category_url, wait_until='domcontentloaded', timeout=45000)
     
+    # Handle "THANK YOU FOR YOUR PATIENCE" page if present
+    await handle_thank_you_page(page)
+    
     # Dismiss any pop-ups
     await dismiss_popups(page)
     
@@ -425,6 +490,9 @@ async def scrape_product(page, product_url: str, product_num: int, total: int, i
         
         # Navigate
         await page.goto(product_url, wait_until='domcontentloaded', timeout=45000)
+        
+        # Handle "THANK YOU FOR YOUR PATIENCE" page if present
+        await handle_thank_you_page(page)
         
         # Dismiss any pop-ups
         await dismiss_popups(page)
