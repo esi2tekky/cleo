@@ -1,0 +1,159 @@
+Loaded 49 evaluation queries
+
+============================================================
+ABLATION STUDY EVALUATION
+============================================================
+
+This script will test the CURRENT backend configuration.
+To test different configurations:
+1. Modify backend/app.py to enable/disable components
+2. Restart the backend
+3. Run this script again
+
+Starting evaluation...
+
+============================================================
+Evaluating: Current Configuration
+============================================================
+[1/49] show me sweaters
+  Precision: 1.00, Recall: 0.06, F1: 0.12
+[2/49] show me dresses
+  Precision: 1.00, Recall: 0.07, F1: 0.12
+[3/49] show me shirts
+  Precision: 1.00, Recall: 0.04, F1: 0.07
+[4/49] show me pants
+  Precision: 0.88, Recall: 0.04, F1: 0.08
+[5/49] show me jackets
+  Precision: 1.00, Recall: 0.04, F1: 0.09
+[6/49] show me black sweaters
+  Precision: 1.00, Recall: 0.37, F1: 0.54
+[7/49] show me black dresses
+  Precision: 1.00, Recall: 0.29, F1: 0.45
+[8/49] show me white sweaters
+  Precision: 1.00, Recall: 0.80, F1: 0.89
+[9/49] show me white dresses
+  Precision: 1.00, Recall: 0.55, F1: 0.71
+[10/49] show me navy sweaters
+  Precision: 1.00, Recall: 0.44, F1: 0.62
+[11/49] show me navy dresses
+  Precision: 1.00, Recall: 0.43, F1: 0.61
+[12/49] show me red sweaters
+  Precision: 1.00, Recall: 0.67, F1: 0.80
+[13/49] show me red dresses
+  Precision: 1.00, Recall: 0.35, F1: 0.52
+[14/49] show me wool sweaters
+  Precision: 1.00, Recall: 0.09, F1: 0.17
+[15/49] show me cotton sweaters
+  Precision: 1.00, Recall: 0.13, F1: 0.23
+[16/49] show me cashmere sweaters
+  Precision: 1.00, Recall: 0.17, F1: 0.29
+[17/49] show me wool black sweaters
+  Precision: 1.00, Recall: 0.50, F1: 0.67
+[18/49] show me cotton white shirts
+  Precision: 1.00, Recall: 0.14, F1: 0.24
+[19/49] show me wool brown sweaters
+  Precision: 1.00, Recall: 0.75, F1: 0.86
+[20/49] show me cotton navy dresses
+  Precision: 1.00, Recall: 0.47, F1: 0.64
+[21/49] show me sweaters under $200
+  ⚠️  Error 500: <!doctype html>
+<html lang=en>
+  <head>
+    <title>pandas.errors.IntCastingNaNError: Cannot convert 
+  Precision: 0.00, Recall: 0.00, F1: 0.00
+[22/49] show me dresses over $150
+  ⚠️  Error 500: <!doctype html>
+<html lang=en>
+  <head>
+    <title>pandas.errors.IntCastingNaNError: Cannot convert 
+  Precision: 0.00, Recall: 0.00, F1: 0.00
+[23/49] show me sweaters between $100 and $300
+  ⚠️  Error 500: <!doctype html>
+<html lang=en>
+  <head>
+    <title>pandas.errors.IntCastingNaNError: Cannot convert 
+  Precision: 0.00, Recall: 0.00, F1: 0.00
+[24/49] show me jackets under $200
+  ⚠️  Error 500: <!doctype html>
+<html lang=en>
+  <head>
+    <title>pandas.errors.IntCastingNaNError: Cannot convert 
+  Precision: 0.00, Recall: 0.00, F1: 0.00
+[25/49] show me patterned sweaters
+  Precision: 1.00, Recall: 0.09, F1: 0.16
+[26/49] show me dresses with no pattern
+  Precision: 1.00, Recall: 0.09, F1: 0.17
+[27/49] show me shirts with pattern
+  Precision: 0.75, Recall: 0.05, F1: 0.09
+[28/49] show me minimalist sweaters
+  Precision: 0.00, Recall: 0.00, F1: 0.00
+[29/49] show me classic sweaters
+  Precision: 0.30, Recall: 0.07, F1: 0.11
+[30/49] show me modern sweaters
+  Precision: 0.90, Recall: 0.16, F1: 0.28
+[31/49] show me men's sweaters
+  Precision: 1.00, Recall: 0.60, F1: 0.75
+[32/49] show me women's sweaters
+  Precision: 1.00, Recall: 0.07, F1: 0.13
+[33/49] show me women's dresses
+  Precision: 1.00, Recall: 0.07, F1: 0.12
+[34/49] show me black wool sweaters under $200
+  Precision: 1.00, Recall: 0.44, F1: 0.62
+[35/49] show me white cotton dresses under $150
+  Precision: 1.00, Recall: 0.70, F1: 0.82
+[36/49] which of those are under $200
+  ⚠️  Error 500: <!doctype html>
+<html lang=en>
+  <head>
+    <title>pandas.errors.IntCastingNaNError: Cannot convert 
+  Precision: 0.00, Recall: 0.00, F1: 0.00
+[37/49] which of those are under $200
+  ⚠️  Error 500: <!doctype html>
+<html lang=en>
+  <head>
+    <title>pandas.errors.IntCastingNaNError: Cannot convert 
+  Precision: 0.00, Recall: 0.00, F1: 0.00
+[38/49] which of those are under $200
+  ⚠️  Error 500: <!doctype html>
+<html lang=en>
+  <head>
+    <title>pandas.errors.IntCastingNaNError: Cannot convert 
+  Precision: 0.00, Recall: 0.00, F1: 0.00
+[39/49] which of those are the cheapest
+  Precision: 0.00, Recall: 0.00, F1: 0.00
+[40/49] show me accessories
+  Precision: 0.67, Recall: 0.10, F1: 0.17
+[41/49] show me pants
+  Precision: 0.88, Recall: 0.04, F1: 0.08
+[42/49] show me shorts
+  Precision: 1.00, Recall: 0.36, F1: 0.53
+[43/49] show me skirts
+  Precision: 1.00, Recall: 0.24, F1: 0.39
+[44/49] show me beige sweaters
+  Precision: 1.00, Recall: 0.73, F1: 0.84
+[45/49] show me navy sweaters
+  Precision: 1.00, Recall: 0.44, F1: 0.62
+[46/49] show me grey sweaters
+  Precision: 1.00, Recall: 0.47, F1: 0.64
+[47/49] show me minimalist black sweaters
+  Precision: 0.14, Recall: 0.50, F1: 0.22
+[48/49] show me classic black sweaters
+  Precision: 0.57, Recall: 0.57, F1: 0.57
+[49/49] show me classic white sweaters
+  Precision: 0.25, Recall: 1.00, F1: 0.40
+
+============================================================
+EVALUATION RESULTS
+============================================================
+Configuration: Current Configuration
+Number of queries: 49
+
+Metrics:
+  Average Precision: 0.741
+  Average Recall: 0.269
+  Average F1 Score: 0.335
+  Average Precision@K: 0.632
+  Success Rate (F1 > 0.5): 36.7%
+  Average Latency: 468.5 ms
+
+✅ Results saved to ablation_results.json

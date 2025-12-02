@@ -1,0 +1,167 @@
+Loaded 49 evaluation queries
+
+============================================================
+SIMPLIFIED ABLATION STUDY
+============================================================
+
+Testing 4 configurations:
+1. Baseline: No filtering, No semantic ranking
+2. + Filtering: With filtering, No semantic ranking
+3. + Semantic Ranking: With filtering, With semantic ranking
+4. Semantic Only: No filtering, With semantic ranking
+
+Starting evaluation...
+
+============================================================
+CONFIGURATION 1: Baseline
+============================================================
+
+============================================================
+Evaluating: Baseline
+  Filtering: OFF
+  Semantic Ranking: OFF
+============================================================
+[1/49] show me sweaters
+  Precision: 0.10, Correct: 1/10
+  Precision: 0.00, Correct: 0/10
+  Precision: 0.40, Correct: 4/10
+  Precision: 0.00, Correct: 0/10
+  Precision: 1.00, Correct: 10/10
+[10/49] show me navy sweaters
+  Precision: 0.00, Correct: 0/10
+[20/49] show me cotton navy dresses
+  Precision: 0.00, Correct: 0/10
+[30/49] show me modern sweaters
+  Precision: 0.00, Correct: 0/10
+[40/49] show me accessories
+  Precision: 0.00, Correct: 0/10
+
+============================================================
+CONFIGURATION 2: + Filtering
+============================================================
+
+============================================================
+Evaluating: + Filtering
+  Filtering: ON
+  Semantic Ranking: OFF
+============================================================
+[1/49] show me sweaters
+  Precision: 1.00, Correct: 10/10
+  Precision: 1.00, Correct: 5/5
+  Precision: 0.00, Correct: 0/1
+  Precision: 0.00, Correct: 0/10
+  Precision: 1.00, Correct: 10/10
+[10/49] show me navy sweaters
+  Precision: 1.00, Correct: 10/10
+[20/49] show me cotton navy dresses
+  Precision: 1.00, Correct: 10/10
+  ⚠️  Error 500: <!doctype html>
+<html lang=en>
+  <head>
+    <title>pandas.errors.IntCastingNaNError: Cannot convert 
+  ⚠️  Error 500: <!doctype html>
+<html lang=en>
+  <head>
+    <title>pandas.errors.IntCastingNaNError: Cannot convert 
+[30/49] show me modern sweaters
+  Precision: 0.90, Correct: 9/10
+  ⚠️  Error 500: <!doctype html>
+<html lang=en>
+  <head>
+    <title>KeyError: &#39;price&#39;
+ // Werkzeug Debugger</
+[40/49] show me accessories
+  Precision: 0.40, Correct: 4/10
+
+============================================================
+CONFIGURATION 3: + Semantic Ranking
+============================================================
+
+============================================================
+Evaluating: + Semantic Ranking
+  Filtering: ON
+  Semantic Ranking: ON
+============================================================
+[1/49] show me sweaters
+  Precision: 1.00, Correct: 10/10
+  Precision: 1.00, Correct: 5/5
+  Precision: 0.00, Correct: 0/1
+  Precision: 0.00, Correct: 0/10
+  Precision: 1.00, Correct: 10/10
+[10/49] show me navy sweaters
+  Precision: 1.00, Correct: 10/10
+[20/49] show me cotton navy dresses
+  Precision: 1.00, Correct: 10/10
+  ⚠️  Error 500: <!doctype html>
+<html lang=en>
+  <head>
+    <title>pandas.errors.IntCastingNaNError: Cannot convert 
+  ⚠️  Error 500: <!doctype html>
+<html lang=en>
+  <head>
+    <title>pandas.errors.IntCastingNaNError: Cannot convert 
+[30/49] show me modern sweaters
+  Precision: 0.90, Correct: 9/10
+  ⚠️  Error 500: <!doctype html>
+<html lang=en>
+  <head>
+    <title>KeyError: &#39;price&#39;
+ // Werkzeug Debugger</
+[40/49] show me accessories
+  Precision: 0.40, Correct: 4/10
+
+============================================================
+CONFIGURATION 4: Semantic Only
+============================================================
+
+============================================================
+Evaluating: Semantic Only
+  Filtering: OFF
+  Semantic Ranking: ON
+============================================================
+[1/49] show me sweaters
+  Precision: 1.00, Correct: 10/10
+  Precision: 0.80, Correct: 8/10
+  Precision: 1.00, Correct: 10/10
+  Precision: 1.00, Correct: 10/10
+  Precision: 1.00, Correct: 10/10
+[10/49] show me navy sweaters
+  Precision: 0.00, Correct: 0/10
+[20/49] show me cotton navy dresses
+  Precision: 0.10, Correct: 1/10
+[30/49] show me modern sweaters
+  Precision: 0.20, Correct: 2/10
+[40/49] show me accessories
+  Precision: 0.10, Correct: 1/10
+
+================================================================================
+ABLATION STUDY RESULTS - COMPARISON TABLE
+================================================================================
+
+Configuration                  Filtering    Semantic     Avg Precision   Perfect %    Avg Correct  Latency (ms)
+--------------------------------------------------------------------------------
+Baseline                       OFF          OFF          0.080           2.0          0.8          141.0       
++ Filtering                    ON           OFF          0.629           57.1         5.6          147.6       
++ Semantic Ranking             ON           ON           0.629           57.1         5.6          287.4       
+Semantic Only                  OFF          ON           0.418           12.2         4.2          514.1       
+
+================================================================================
+METRICS EXPLANATION:
+  - Avg Precision: Average percentage of returned items that are correct
+  - Perfect %: Percentage of queries where ALL returned items are correct
+  - Avg Correct: Average number of correct items returned per query
+  - Latency: Average query processing time in milliseconds
+================================================================================
+
+✅ All results saved to simplified_ablation_results.json
+
+============================================================
+CUSTOM CONFIGURATION EXAMPLE
+============================================================
+To test a custom configuration, use:
+  result = test_custom_configuration(
+      name='My Config',
+      use_filtering=True,
+      use_semantic=False,
+      queries=queries
+  )

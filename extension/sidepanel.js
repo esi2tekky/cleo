@@ -97,7 +97,21 @@ document.addEventListener('DOMContentLoaded', () => {
         genderMenBtn.classList.remove('active');
         genderWomenBtn.classList.remove('active');
     });
-
+    
+    // Suggestion chip click handlers
+    const suggestionChips = document.querySelectorAll('.chip');
+    suggestionChips.forEach(chip => {
+        chip.addEventListener('click', () => {
+            const suggestion = chip.getAttribute('data-suggestion');
+            if (suggestion) {
+                // Set the query input value
+                queryInput.value = suggestion;
+                // Trigger the send handler
+                handleSend();
+            }
+        });
+    });
+    
     // Send message on button click
     sendButton.addEventListener('click', handleSend);
     
