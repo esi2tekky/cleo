@@ -1200,7 +1200,16 @@ def handle_query():
             category_match = results_df['category'].astype(str).str.lower().str.contains(
                 product_type, na=False
             )
-            type_mask |= (name_match | category_match)
+            
+            # Special handling for 'dress': exclude jumpsuits even if category matches
+            if product_type == 'dress':
+                # Exclude jumpsuits explicitly (they're in 'dresses' category but are not dresses)
+                jumpsuit_exclude = ~results_df['name'].astype(str).str.lower().str.contains(
+                    'jumpsuit|romper', na=False, regex=True
+                )
+                type_mask |= ((name_match | category_match) & jumpsuit_exclude)
+            else:
+                type_mask |= (name_match | category_match)
         results_df = results_df[type_mask]
     
     # Also check for category names in query (e.g., "knitwear", "accessories", "bottoms", "tops")
