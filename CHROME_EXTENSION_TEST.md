@@ -83,3 +83,4 @@ Try these queries to test different features:
 ✅ Image upload (optional)
 ✅ Pinecone vector search
 
+

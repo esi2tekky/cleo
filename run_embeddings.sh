@@ -28,3 +28,4 @@ echo "✅ API keys found"
 echo "Running embedding generation..."
 python3 scripts/regenerate_openai_embeddings.py
 
+

@@ -12,6 +12,10 @@ let lastDisplayedProducts = [];
 // Gender filter state
 let selectedGender = 'all'; // 'men', 'women', or 'all'
 
+// Session ID for conversation memory
+let sessionId = localStorage.getItem('cleo_session_id') || `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+localStorage.setItem('cleo_session_id', sessionId);
+
 // Load tagged products from localStorage
 function loadTaggedProducts() {
     const stored = localStorage.getItem(TAGGED_PRODUCTS_KEY);
@@ -164,7 +168,8 @@ document.addEventListener('DOMContentLoaded', () => {
                     top_k: 10,
                     tagged_products: productsToSend,  // Send tagged products before clearing
                     last_displayed_products: lastDisplayedProducts,  // Send last displayed products for "which of these" queries
-                    gender: selectedGender  // Send selected gender filter
+                    gender: selectedGender,  // Send selected gender filter
+                    session_id: sessionId  // Send session ID for conversation memory
                 })
             });
 
@@ -321,18 +326,7 @@ document.addEventListener('DOMContentLoaded', () => {
         info.appendChild(price);
 
         // Attributes - colors and materials excluded per user request
-        // (Keeping color matches as they're useful for styling suggestions)
-
-        // Color matches
-        if (product.complementary_colors) {
-            const matches = document.createElement('div');
-            matches.className = 'color-matches';
-            // Limit to first 3 colors
-            const colorsList = product.complementary_colors.split(',').map(c => c.trim()).slice(0, 3);
-            const limitedColors = colorsList.join(', ');
-            matches.innerHTML = `<strong>Pairs with:</strong> ${limitedColors}`;
-            info.appendChild(matches);
-        }
+        // (Keeping complementary_colors data available but not displaying in UI)
 
         // Link button
         if (product.url) {

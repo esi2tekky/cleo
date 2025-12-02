@@ -97,3 +97,4 @@ class OpenAIEmbedder:
                 results.extend([None] * len(batch))
         return results
 
+

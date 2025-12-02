@@ -334,7 +334,7 @@ class QueryParser:
     
     def detect_query_intent(self, query: str, last_context: Optional[Dict] = None) -> Dict:
         """
-        Detect the intent of a query (correction, refinement, narrowing, continuation, new).
+        Detect the intent of a query (correction, refinement, narrowing, augment, switch, new).
         
         Args:
             query: Current query text
@@ -366,12 +366,14 @@ class QueryParser:
                 result['confidence'] = 0.9
                 return result
         
-        # Refinement patterns
+        # Refinement patterns (improved for gender/attribute changes)
         refinement_patterns = [
             r'\bmake\s+it\s+',
             r'\bchange\s+it\s+to',
             r'\bswitch\s+to',
             r'\binstead',
+            r'\bfor\s+men\b',  # "for men" as refinement when previous query had different gender
+            r'\bfor\s+women\b',  # "for women" as refinement
         ]
         for pattern in refinement_patterns:
             if re.search(pattern, query_lower):
@@ -392,25 +394,41 @@ class QueryParser:
                 result['confidence'] = 0.7
                 return result
         
-        # Continuation patterns
-        continuation_patterns = [
+        # Switch patterns (explicit context switch)
+        switch_patterns = [
+            r'\bhow\s+about\b',  # "how about beach"
+            r'\bwhat\s+about\b',  # "what about beach"
+            r'\bhow\s+about\s+for\b',
+            r'\binstead\s+of\b',
+        ]
+        for pattern in switch_patterns:
+            if re.search(pattern, query_lower):
+                result['intent'] = 'switch'
+                result['confidence'] = 0.8
+                return result
+                
+        # Augment patterns (adding to context)
+        augment_patterns = [
             r'\band\s+',
             r'\balso\s+',
             r'\bplus\s+',
             r'\badd\s+',
             r'\bwith\s+',
-            r'\bunder\s+',
-            r'\bover\s+',
-            r'\bfor\s+men\b',
-            r'\bfor\s+women\b',
-            r'\bin\s+men',
-            r'\bin\s+women',
         ]
-        for pattern in continuation_patterns:
+        for pattern in augment_patterns:
             if re.search(pattern, query_lower):
-                result['intent'] = 'continuation'
-                result['confidence'] = 0.6
+                result['intent'] = 'augment'
+                result['confidence'] = 0.7
                 return result
+
+        # Check for implicit switch via situational keywords (e.g., "a beach day")
+        # If the query contains a new occasion, location, weather, or season, treat as switch
+        current_parsed = self.parse_situational_query(query)
+        if current_parsed['occasion'] or current_parsed['location'] or current_parsed['weather'] or current_parsed['season']:
+            # If we found situational context but no explicit connecting words, it's likely a switch/override
+            result['intent'] = 'switch'
+            result['confidence'] = 0.75
+            return result
         
         return result
     
@@ -421,7 +439,7 @@ class QueryParser:
         Args:
             current_query: Current user query
             last_context: Previous query context
-            intent: Query intent ('correction', 'refinement', 'narrowing', 'continuation', 'new')
+            intent: Query intent ('correction', 'refinement', 'narrowing', 'augment', 'switch', 'new')
             
         Returns:
             Merged context dict with query_text, parsed_components, applied_filters
@@ -453,33 +471,70 @@ class QueryParser:
             if current_parsed.get('product_type'):
                 merged['parsed_components']['product_type'] = current_parsed['product_type']
                 merged['applied_filters']['product_type'] = current_parsed['product_type']
-            # Merge style keywords
-            if current_parsed.get('style_keywords'):
-                existing = merged['parsed_components'].get('style_keywords', [])
-                merged['parsed_components']['style_keywords'] = list(set(existing + current_parsed['style_keywords']))
         
         elif intent == 'narrowing':
             # Add stricter filters
             if current_parsed.get('product_type'):
                 merged['parsed_components']['product_type'] = current_parsed['product_type']
                 merged['applied_filters']['product_type'] = current_parsed['product_type']
-            if current_parsed.get('style_keywords'):
-                existing = merged['parsed_components'].get('style_keywords', [])
-                merged['parsed_components']['style_keywords'] = list(set(existing + current_parsed['style_keywords']))
         
-        elif intent == 'continuation':
-            # Add additional criteria
+        elif intent == 'switch':
+            # Override situational context (weather, season, location, occasion, time)
+            # But preserve gender and product_type unless specified in new query
+            
+            # Clear previous situational fields
+            for field in ['weather', 'season', 'location', 'occasion', 'time']:
+                merged['parsed_components'][field] = None
+                merged['applied_filters'][field] = None
+            
+            # Clear previous style keywords as they are derived from situation
+            merged['parsed_components']['style_keywords'] = []
+            merged['applied_filters']['style_keywords'] = []
+            
+            # Update with new context
             if current_parsed.get('gender'):
                 merged['parsed_components']['gender'] = current_parsed['gender']
                 merged['applied_filters']['gender'] = current_parsed['gender']
-            if current_parsed.get('style_keywords'):
-                existing = merged['parsed_components'].get('style_keywords', [])
-                merged['parsed_components']['style_keywords'] = list(set(existing + current_parsed['style_keywords']))
-        
-        # Always update with current parsed components that aren't already set
+            
+            if current_parsed.get('product_type'):
+                merged['parsed_components']['product_type'] = current_parsed['product_type']
+                merged['applied_filters']['product_type'] = current_parsed['product_type']
+            
+        elif intent == 'augment':
+            # Add to context without clearing (e.g., "and a hat", "and red")
+            if current_parsed.get('gender'):
+                merged['parsed_components']['gender'] = current_parsed['gender']
+                merged['applied_filters']['gender'] = current_parsed['gender']
+            
+            # If product type is specified, it might override or add. 
+            # Usually "and a hat" means look for hats IN ADDITION to previous items? 
+            # Or switch focus to hats within same context?
+            # For search simplicity, we usually switch the target product type but keep the style context.
+            if current_parsed.get('product_type'):
+                merged['parsed_components']['product_type'] = current_parsed['product_type']
+                merged['applied_filters']['product_type'] = current_parsed['product_type']
+
+        # For all intents (including continuation/augment/switch/refinement), 
+        # update situational fields from current query
+        for field in ['weather', 'season', 'location', 'occasion', 'time']:
+            if current_parsed.get(field):
+                merged['parsed_components'][field] = current_parsed[field]
+                merged['applied_filters'][field] = current_parsed[field]
+                
+        # Always update with current parsed components that aren't already set (filling gaps)
         for key, value in current_parsed.items():
             if key not in merged['parsed_components'] or merged['parsed_components'][key] is None:
                 merged['parsed_components'][key] = value
+
+        # REGENERATE style keywords from the final merged situational context
+        # This ensures keywords match the new situation (e.g. if switched from Winter to Beach)
+        merged['parsed_components']['style_keywords'] = self.combine_contexts(
+            merged['parsed_components'].get('weather'),
+            merged['parsed_components'].get('location'),
+            merged['parsed_components'].get('occasion'),
+            merged['parsed_components'].get('season')
+        )
+        merged['applied_filters']['style_keywords'] = merged['parsed_components']['style_keywords']
         
         return merged
     

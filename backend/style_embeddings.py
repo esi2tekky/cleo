@@ -155,3 +155,4 @@ def get_style_embedding_query(query: str, embedder, parsed_components: Optional[
     # Fallback to regular embedding
     return embedder.get_embedding(query)
 
+
