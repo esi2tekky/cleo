@@ -198,6 +198,14 @@ class StyleEnricher:
     
     def download_image(self, url: str, timeout: int = 10) -> Optional[Image.Image]:
         """Download and load an image from URL."""
+        # Handle NaN, None, or invalid URLs
+        if url is None or pd.isna(url):
+            return None
+        if not isinstance(url, str):
+            return None
+        if str(url).lower() in ['nan', 'none', '']:
+            return None
+        
         try:
             response = requests.get(url, timeout=timeout, stream=True)
             response.raise_for_status()
@@ -207,7 +215,9 @@ class StyleEnricher:
                 img = img.convert('RGB')
             return img
         except Exception as e:
-            print(f"  ⚠️  Failed to download {url[:60]}...: {e}")
+            url_str = str(url) if url else "unknown"
+            url_display = url_str[:60] + "..." if len(url_str) > 60 else url_str
+            print(f"  ⚠️  Failed to download {url_display}: {e}")
             return None
     
     def get_visual_embedding(self, image_url: str) -> Optional[np.ndarray]:
@@ -733,8 +743,9 @@ class StyleEnricher:
         enriched = product.copy()
         
         # Visual embedding from primary image
-        if product.get('primary_image'):
-            visual_emb = self.get_visual_embedding(product['primary_image'])
+        primary_image = product.get('primary_image')
+        if primary_image and pd.notna(primary_image) and isinstance(primary_image, str) and primary_image.strip():
+            visual_emb = self.get_visual_embedding(primary_image)
             if visual_emb is not None:
                 enriched['visual_embedding'] = visual_emb.tolist()
                 enriched['has_visual_embedding'] = True
@@ -786,8 +797,49 @@ class StyleEnricher:
             )
         
         # Merge attributes (image-based adds to text-based, removes duplicates)
+        # IMPORTANT: Prioritize colors from product name over image-based colors
+        # If product name explicitly mentions a color (e.g., "Black"), trust that over CLIP's image analysis
+        text_colors = text_attrs['colors']
+        image_colors = image_attrs.get('colors', [])
+        
+        # Check if product name explicitly mentions colors
+        name_lower = name.lower() if name else ""
+        explicit_colors_in_name = []
+        color_keywords = ['black', 'white', 'navy', 'beige', 'brown', 'grey', 'gray', 'red', 'blue', 
+                         'green', 'yellow', 'pink', 'purple', 'orange', 'tan', 'camel', 'cream', 
+                         'ivory', 'charcoal', 'olive', 'burgundy', 'maroon', 'dark', 'light']
+        for color in color_keywords:
+            if color in name_lower:
+                explicit_colors_in_name.append(color)
+        
+        # Merge colors with priority to text-based (especially from name)
+        if explicit_colors_in_name:
+            # If name explicitly mentions colors, prioritize those
+            # Only add image colors if they don't contradict explicit colors
+            merged_colors = explicit_colors_in_name.copy()
+            # Add other text colors
+            for color in text_colors:
+                if color.lower() not in [c.lower() for c in merged_colors]:
+                    merged_colors.append(color)
+            # Only add image colors that don't contradict explicit colors
+            # (e.g., if name says "Black", don't add "red" from image unless it's clearly a multi-color item)
+            for color in image_colors:
+                color_lower = color.lower()
+                # Skip image colors that contradict explicit neutral colors
+                # If name says black/white/navy/charcoal, image-detected vibrant colors are likely wrong
+                if any(explicit in ['black', 'white', 'navy', 'charcoal', 'grey', 'gray'] 
+                       for explicit in explicit_colors_in_name):
+                    if color_lower in ['red', 'blue', 'green', 'yellow', 'pink', 'purple', 'orange']:
+                        # Skip - likely false positive from CLIP
+                        continue
+                if color_lower not in [c.lower() for c in merged_colors]:
+                    merged_colors.append(color)
+        else:
+            # No explicit colors in name, merge both sources
+            merged_colors = list(set(text_colors + image_colors))
+        
         style_attrs = {
-            'colors': list(set(text_attrs['colors'] + image_attrs.get('colors', []))),
+            'colors': merged_colors,
             'materials': list(set(text_attrs['materials'] + image_attrs.get('materials', []))),
             'patterns': list(set(text_attrs['patterns'] + image_attrs.get('patterns', []))),
             'fit': text_attrs['fit'] or image_attrs.get('fit'),

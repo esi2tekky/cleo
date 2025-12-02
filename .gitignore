@@ -13,3 +13,5 @@ data/processed/*
 # Notebooks
 .ipynb_checkpoints/
 
+backend/.env
+backend/.env.local

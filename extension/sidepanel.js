@@ -2,30 +2,28 @@
 
 const API_BASE_URL = 'http://localhost:5001/api';
 
-// Generate or retrieve session ID
-let sessionId = localStorage.getItem('cleo_session_id');
-if (!sessionId) {
-    sessionId = 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-    localStorage.setItem('cleo_session_id', sessionId);
-}
-
-// Store image embedding if uploaded
-let currentImageEmbedding = null;
-
 // Tagged products state management
 let taggedProducts = [];
 const TAGGED_PRODUCTS_KEY = 'cleo_tagged_products';
 
-// Gender preference state management
-let selectedGender = localStorage.getItem('cleo_gender_preference') || 'all';
-const GENDER_PREFERENCE_KEY = 'cleo_gender_preference';
+// Last displayed products (for "show me more like this" without tagging)
+let lastDisplayedProducts = [];
+
+// Gender filter state
+let selectedGender = 'all'; // 'men', 'women', or 'all'
 
 // Load tagged products from localStorage
 function loadTaggedProducts() {
     const stored = localStorage.getItem(TAGGED_PRODUCTS_KEY);
     if (stored) {
         try {
-            taggedProducts = JSON.parse(stored);
+            const parsed = JSON.parse(stored);
+            // Validate tagged products - only keep those with valid index
+            taggedProducts = parsed.filter(p => p.index !== null && p.index !== undefined);
+            // If validation removed products, save the cleaned list
+            if (taggedProducts.length !== parsed.length) {
+                saveTaggedProducts();
+            }
         } catch (e) {
             taggedProducts = [];
         }
@@ -40,169 +38,65 @@ function saveTaggedProducts() {
 // Initialize tagged products on load
 loadTaggedProducts();
 
+// Function to update tagged indicator
+function updateTaggedIndicator() {
+    const indicator = document.getElementById('tagged-indicator');
+    const countText = document.getElementById('tagged-count-text');
+    if (!indicator || !countText) return;
+    
+    // Only show indicator if there are tagged products AND products are currently displayed
+    // This prevents showing "1 product tagged" when no products are visible
+    const count = taggedProducts.length;
+    const hasDisplayedProducts = lastDisplayedProducts.length > 0;
+    
+    if (count === 0 || !hasDisplayedProducts) {
+        indicator.style.display = 'none';
+    } else {
+        indicator.style.display = 'flex';
+        if (count === 1) {
+            countText.textContent = '1 product tagged';
+        } else {
+            countText.textContent = `${count} products tagged`;
+        }
+    }
+}
+
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
     const queryInput = document.getElementById('query-input');
     const sendButton = document.getElementById('send-button');
     const messagesContainer = document.getElementById('messages');
     const loadingIndicator = document.getElementById('loading');
-    const imageInput = document.getElementById('image-input');
-    const imagePreview = document.getElementById('image-preview');
-    const imageUploadBtn = document.getElementById('image-upload-btn');
     
-    // Gender toggle buttons
+    // Initialize tagged indicator
+    updateTaggedIndicator();
+
+    // Gender filter buttons
     const genderMenBtn = document.getElementById('gender-men');
     const genderWomenBtn = document.getElementById('gender-women');
     const genderAllBtn = document.getElementById('gender-all');
     
-    // Setup gender toggle
-    function updateGenderToggle(gender) {
-        selectedGender = gender;
-        localStorage.setItem(GENDER_PREFERENCE_KEY, gender);
-        
-        // Update button states (support both old and new class names)
-        if (genderMenBtn && genderWomenBtn && genderAllBtn) {
-            genderMenBtn.classList.remove('active');
-            genderWomenBtn.classList.remove('active');
-            genderAllBtn.classList.remove('active');
-            
-            if (gender === 'men') {
-                genderMenBtn.classList.add('active');
-            } else if (gender === 'women') {
-                genderWomenBtn.classList.add('active');
-            } else {
-                genderAllBtn.classList.add('active');
-            }
-        }
-    }
-    
-    // Initialize gender toggle state
-    updateGenderToggle(selectedGender);
-    
-    // Gender toggle click handlers
-    genderMenBtn.addEventListener('click', () => updateGenderToggle('men'));
-    genderWomenBtn.addEventListener('click', () => updateGenderToggle('women'));
-    genderAllBtn.addEventListener('click', () => updateGenderToggle('all'));
-    
-    // Setup suggestion chip click handlers
-    const suggestionChips = document.querySelectorAll('.chip[data-suggestion]');
-    suggestionChips.forEach(chip => {
-        chip.addEventListener('click', function() {
-            const suggestion = this.getAttribute('data-suggestion');
-            if (suggestion && queryInput && sendButton) {
-                queryInput.value = suggestion;
-                sendButton.click();
-            }
-        });
+    // Gender button click handlers
+    genderMenBtn.addEventListener('click', () => {
+        selectedGender = 'men';
+        genderMenBtn.classList.add('active');
+        genderWomenBtn.classList.remove('active');
+        genderAllBtn.classList.remove('active');
     });
     
-    // Clear image button handler
-    const clearImageBtn = document.getElementById('clear-image');
-    if (clearImageBtn) {
-        clearImageBtn.addEventListener('click', () => {
-            currentImageEmbedding = null;
-            const previewContainer = document.getElementById('image-preview-container');
-            if (previewContainer) {
-                previewContainer.style.display = 'none';
-            }
-            if (imagePreview) {
-                imagePreview.src = '';
-            }
-            const sendBtn = document.querySelector('.send-button-modern');
-            if (sendBtn) {
-                sendBtn.classList.remove('has-image');
-                sendBtn.title = 'Send';
-            }
-            addMessage('Image removed.', 'bot');
-        });
-    }
+    genderWomenBtn.addEventListener('click', () => {
+        selectedGender = 'women';
+        genderWomenBtn.classList.add('active');
+        genderMenBtn.classList.remove('active');
+        genderAllBtn.classList.remove('active');
+    });
     
-    // Setup image upload (if elements exist)
-    if (imageInput && imageUploadBtn) {
-        imageUploadBtn.addEventListener('click', () => {
-            imageInput.click();
-        });
-        
-        imageInput.addEventListener('change', async (e) => {
-            const file = e.target.files[0];
-            if (!file) return;
-            
-            // Validate image
-            if (!file.type.startsWith('image/')) {
-                addMessage('Please upload an image file.', 'bot');
-                return;
-            }
-            
-            // Show preview
-            const reader = new FileReader();
-            reader.onload = (event) => {
-                if (imagePreview) {
-                    imagePreview.src = event.target.result;
-                    const previewContainer = document.getElementById('image-preview-container');
-                    if (previewContainer) {
-                        previewContainer.style.display = 'block';
-                    }
-                }
-            };
-            reader.readAsDataURL(file);
-            
-            // Show loading state with typing indicator
-            showTypingIndicator();
-            
-            // Convert to base64 and send to backend
-            const base64 = await fileToBase64(file);
-            
-            try {
-                const response = await fetch(`${API_BASE_URL}/upload-image`, {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({
-                        image: base64,
-                        session_id: sessionId
-                    })
-                });
-                
-                const data = await response.json();
-                if (data.status === 'success') {
-                    currentImageEmbedding = data.embedding;
-                    // Hide typing indicator and add success message
-                    hideTypingIndicator();
-                    addMessage('✅ Image ready! Type a description or press Send to find similar items.', 'bot');
-                    
-                    // Add visual indicator to send button
-                    const sendBtn = document.querySelector('.send-button-modern');
-                    if (sendBtn) {
-                        sendBtn.classList.add('has-image');
-                        sendBtn.title = 'Send with image';
-                    }
-                } else {
-                    throw new Error(data.error || 'Upload failed');
-                }
-            } catch (error) {
-                console.error('Image upload error:', error);
-                // Hide typing indicator
-                hideTypingIndicator();
-                addMessage('❌ Failed to process image. Please try again.', 'bot');
-                // Hide preview on error
-                const previewContainer = document.getElementById('image-preview-container');
-                if (previewContainer) {
-                    previewContainer.style.display = 'none';
-                }
-                if (imagePreview) {
-                    imagePreview.src = '';
-                }
-            }
-        });
-    }
-    
-    function fileToBase64(file) {
-        return new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve(reader.result);
-            reader.onerror = reject;
-            reader.readAsDataURL(file);
-        });
-    }
+    genderAllBtn.addEventListener('click', () => {
+        selectedGender = 'all';
+        genderAllBtn.classList.add('active');
+        genderMenBtn.classList.remove('active');
+        genderWomenBtn.classList.remove('active');
+    });
 
     // Send message on button click
     sendButton.addEventListener('click', handleSend);
@@ -216,199 +110,75 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function handleSend() {
         const query = queryInput.value.trim();
-        const hasImage = currentImageEmbedding !== null;
-        const imagePreview = document.getElementById('image-preview');
-        
-        if (!query && !hasImage) return;
+        if (!query) return;
 
-        // Check if query references a tagged product
-        function hasTaggedProductReference(queryText, taggedProductsList) {
-            if (!queryText || !taggedProductsList || taggedProductsList.length === 0) {
-                return false;
-            }
-            const queryLower = queryText.toLowerCase();
-            
-            // Check for @ symbol in query
-            if (queryText.includes('@')) {
-                return true;
-            }
-            
-            // Check for pronouns that reference products
-            const pronounPatterns = ['this', 'it', 'that', 'this one', 'that one'];
-            if (pronounPatterns.some(pronoun => queryLower.includes(pronoun))) {
-                return true;
-            }
-            // Check if query mentions a tagged product by name
-            for (const taggedProduct of taggedProductsList) {
-                const productName = (taggedProduct.name || '').toLowerCase();
-                if (productName && queryLower.includes(productName)) {
-                    return true;
+        // Check if query references a product (e.g., "show me more like this")
+        const queryLower = query.toLowerCase();
+        const pronounPatterns = ['this', 'that', 'it', 'this one', 'that one'];
+        const similarPatterns = ['more like', 'similar', 'like this', 'like that'];
+        const hasReference = pronounPatterns.some(p => queryLower.includes(p)) || 
+                           similarPatterns.some(p => queryLower.includes(p));
+        
+        // Determine which products to send as tagged products
+        let productsToSend = [];
+        if (hasReference) {
+            // If we have tagged products, use those
+            if (taggedProducts.length > 0) {
+                productsToSend = taggedProducts.filter(p => p.index !== null && p.index !== undefined);
+            } 
+            // Otherwise, use the last displayed product (most recent)
+            else if (lastDisplayedProducts.length > 0) {
+                const lastProduct = lastDisplayedProducts[lastDisplayedProducts.length - 1];
+                if (lastProduct && lastProduct.index !== undefined) {
+                    productsToSend = [{
+                        index: lastProduct.index,
+                        name: lastProduct.name || '',
+                        category: lastProduct.category || ''
+                    }];
+                    console.log(`Using last displayed product (index ${lastProduct.index}) for reference query`);
                 }
             }
-            return false;
         }
-        
-        const hasTaggedReference = hasTaggedProductReference(query, taggedProducts);
-        // Clean @ symbol from display query while keeping it for processing
-        const displayQuery = query.replace(/\s*@\s*/g, ' ').trim();
 
-        // Add user message to chat with image indicator if present
-        if (displayQuery || hasImage) {
-            const messageText = hasImage ? `${displayQuery || 'Image search'} 📷` : displayQuery;
-            addMessage(messageText, 'user');
-        }
-        
-        // Clear input and reset image
+        // Add user message to chat
+        addMessage(query, 'user');
         queryInput.value = '';
-        if (hasImage) {
-            const previewContainer = document.getElementById('image-preview-container');
-            if (previewContainer) {
-                previewContainer.style.display = 'none';
-            }
-            if (imagePreview) {
-                imagePreview.src = '';
-            }
-            // Remove visual indicator from send button
-            const sendBtn = document.querySelector('.send-button-modern');
-            if (sendBtn) {
-                sendBtn.classList.remove('has-image');
-                sendBtn.title = 'Send';
-            }
-        }
         showLoading(true);
-        showTypingIndicator();
-        
-        // Disable send button while processing
-        sendButton.disabled = true;
+
+        // Clear tagged products after sending query (reset for next query)
+        if (taggedProducts.length > 0) {
+            taggedProducts = [];
+            saveTaggedProducts();
+            updateTaggedIndicator();
+        }
 
         try {
-            console.log('Sending query:', query, 'Has tagged reference:', hasTaggedReference, 'Tagged products:', taggedProducts);
-            
-            // Validate tagged products before sending
-            if (hasTaggedReference && taggedProducts.length > 0) {
-                const invalidProducts = taggedProducts.filter(p => p.index === null || p.index === undefined);
-                if (invalidProducts.length > 0) {
-                    console.warn('⚠️  Some tagged products have invalid indices and will be filtered out:', invalidProducts);
-                }
-            }
-            
-            // Check if this is a compatibility query
-            const compatibilityPatterns = ['goes with', 'matches', 'compatible with', 'what goes with'];
-            const isCompatibilityQuery = compatibilityPatterns.some(pattern => 
-                query.toLowerCase().includes(pattern)
-            );
-            
-            if (isCompatibilityQuery) {
-                // Extract product name from query
-                const productMatch = query.match(/(?:goes with|matches|compatible with)\s+(.+)/i);
-                if (productMatch) {
-                    const productName = productMatch[1].trim();
-                    // Call compatibility endpoint
-                    const response = await fetch(`${API_BASE_URL}/compatibility`, {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({
-                            product_id: productName,
-                            type: 'style',
-                            top_k: 5
-                        })
-                    });
-                    
-                    const data = await response.json();
-                    showLoading(false);
-                    
-                    if (data.compatible_products && data.compatible_products.length > 0) {
-                        displayResults(data.compatible_products, query);
-                        addMessage(`These products go well with "${data.reference_product.name}":`, 'bot');
-                    } else {
-                        addMessage("I couldn't find compatible products. Try specifying a product name.", 'bot');
-                    }
-                    return;
-                }
-            }
-            
-            // Send query to backend with session ID and optional image
+            // Send query to backend
             const response = await fetch(`${API_BASE_URL}/query`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({
-                    query: query || '',
+                    query: query,
                     top_k: 10,
-                    session_id: sessionId,
-                    use_visual: hasImage,
-                    image_embedding: currentImageEmbedding,
-                    gender: selectedGender,  // Send gender preference
-                    tagged_products: hasTaggedReference ? taggedProducts
-                        .filter(p => p.index !== null && p.index !== undefined) // Filter out invalid indices
-                        .map(p => ({
-                            index: p.index,
-                            name: p.name,
-                            category: p.category,
-                            gender: p.gender
-                        })) : []
+                    tagged_products: productsToSend,  // Send tagged products before clearing
+                    last_displayed_products: lastDisplayedProducts,  // Send last displayed products for "which of these" queries
+                    gender: selectedGender  // Send selected gender filter
                 })
             });
 
-            // Check response status first
-            if (!response.ok) {
-                throw new Error(`Server error: ${response.status} ${response.statusText}`);
-            }
-            
-            // Check if response is JSON
-            const contentType = response.headers.get("content-type");
-            if (!contentType || !contentType.includes("application/json")) {
-                const text = await response.text();
-                console.error("Non-JSON response:", text);
-                throw new Error("Server returned non-JSON response. Make sure the backend is running properly.");
-            }
-            
             const data = await response.json();
             showLoading(false);
-            hideTypingIndicator();
-            sendButton.disabled = false;
 
             if (data.results && data.results.length > 0) {
-                // Add index to each product if not present (for tagging)
-                const resultsWithIndex = data.results.map((product, idx) => {
-                    if (product.index === undefined) {
-                        // Try to infer index from product data or use array index
-                        // This is a fallback - ideally backend should include index
-                        return { ...product, index: product.index || idx };
-                    }
-                    return product;
-                });
-                
-                // Check for personalized message
-                if (data.personalized_message) {
-                    addMessage(data.personalized_message, 'bot');
-                }
-                
                 // Display results
-                displayResults(resultsWithIndex, query);
-                
-                // Clear image embedding after successful search
-                if (hasImage) {
-                    currentImageEmbedding = null;
-                    addMessage("Image search completed. Upload a new image for another visual search.", 'bot');
-                }
-                
-                // Store user preferences if available
-                if (data.user_preferences) {
-                    localStorage.setItem('cleo_user_preferences', JSON.stringify(data.user_preferences));
-                }
+                displayResults(data.results, query);
             } else {
                 addMessage("I couldn't find any products matching that query. Try rephrasing or asking about colors, materials, or styles.", 'bot');
-                // Clear image embedding even if no results
-                if (hasImage) {
-                    currentImageEmbedding = null;
-                }
             }
         } catch (error) {
             showLoading(false);
-            hideTypingIndicator();
-            sendButton.disabled = false;
             console.error('Error:', error);
             console.error('Error details:', error.message, error.stack);
             let errorMsg = `Sorry, I'm having trouble connecting to the server. Make sure the backend is running on ${API_BASE_URL.replace('/api', '')}`;
@@ -420,66 +190,40 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function addMessage(text, sender) {
-        if (sender === 'bot') {
-            // Create wrapper with avatar for bot messages
-            const messageWrapper = document.createElement('div');
-            messageWrapper.style.display = 'flex';
-            messageWrapper.style.gap = '12px';
-            messageWrapper.style.alignItems = 'flex-start';
-            
-            const avatar = document.createElement('div');
-            avatar.className = 'bot-avatar';
-            avatar.textContent = 'cleo';
-            messageWrapper.appendChild(avatar);
-            
-            const messageDiv = document.createElement('div');
-            messageDiv.className = `message ${sender}-message`;
-            
-            const contentDiv = document.createElement('div');
-            contentDiv.className = 'message-content';
-            contentDiv.textContent = text;
-            
-            messageDiv.appendChild(contentDiv);
-            messageWrapper.appendChild(messageDiv);
-            messagesContainer.appendChild(messageWrapper);
-        } else {
-            // User messages without avatar
-            const messageDiv = document.createElement('div');
-            messageDiv.className = `message ${sender}-message`;
-            
-            const contentDiv = document.createElement('div');
-            contentDiv.className = 'message-content';
-            contentDiv.textContent = text;
-            
-            messageDiv.appendChild(contentDiv);
-            messagesContainer.appendChild(messageDiv);
-        }
+        const messageDiv = document.createElement('div');
+        messageDiv.className = `message ${sender}-message`;
+        
+        const contentDiv = document.createElement('div');
+        contentDiv.className = 'message-content';
+        contentDiv.textContent = text;
+        
+        messageDiv.appendChild(contentDiv);
+        messagesContainer.appendChild(messageDiv);
         messagesContainer.scrollTop = messagesContainer.scrollHeight;
     }
 
     function displayResults(products, query) {
-        // Add bot avatar and message container
-        const messageWrapper = document.createElement('div');
-        messageWrapper.className = 'message-with-avatar';
-        messageWrapper.style.display = 'flex';
-        messageWrapper.style.gap = '12px';
-        messageWrapper.style.alignItems = 'flex-start';
+        // Store last displayed products for reference queries (store full product data)
+        lastDisplayedProducts = products.map(p => ({
+            index: p.index,
+            name: p.name || '',
+            category: p.category || '',
+            description: p.description || '',  // Include description for feature checking
+            url: p.url || '',
+            price: p.price || '',
+            primary_image: p.primary_image || ''  // Include image for display
+        }));
         
-        const avatar = document.createElement('div');
-        avatar.className = 'bot-avatar';
-        avatar.textContent = 'cleo';
-        messageWrapper.appendChild(avatar);
-        
+        // Add bot message with results
         const messageDiv = document.createElement('div');
         messageDiv.className = 'message bot-message';
-        messageDiv.style.flex = '1';
         
         const contentDiv = document.createElement('div');
         contentDiv.className = 'message-content';
         
         const header = document.createElement('div');
         header.className = 'results-header';
-        header.textContent = `Here ${products.length === 1 ? 'is' : 'are'} ${products.length} match${products.length !== 1 ? 'es' : ''} for '${query}':`;
+        header.textContent = `Found ${products.length} product${products.length !== 1 ? 's' : ''}:`;
         contentDiv.appendChild(header);
 
         // Create product cards
@@ -487,17 +231,17 @@ document.addEventListener('DOMContentLoaded', () => {
         productsContainer.className = 'products-grid';
 
         products.forEach((product, index) => {
-            // Try to get index from product object, fallback to array index
-            const productIndex = product.index !== undefined ? product.index : index;
-            const productCard = createProductCard(product, productIndex);
+            const productCard = createProductCard(product, product.index !== undefined ? product.index : index);
             productsContainer.appendChild(productCard);
         });
 
         contentDiv.appendChild(productsContainer);
         messageDiv.appendChild(contentDiv);
-        messageWrapper.appendChild(messageDiv);
-        messagesContainer.appendChild(messageWrapper);
+        messagesContainer.appendChild(messageDiv);
         messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        
+        // Update tagged indicator after displaying products (so it shows if products are tagged)
+        updateTaggedIndicator();
     }
 
     function createProductCard(product, productIndex = null) {
@@ -530,14 +274,38 @@ document.addEventListener('DOMContentLoaded', () => {
         });
         card.appendChild(tagButton);
 
-        // Product image
-        if (product.primary_image) {
+        // Product image (always create container, with fallback for missing/failed images)
+        const imgContainer = document.createElement('div');
+        imgContainer.className = 'product-image-container';
+        
+        if (product.primary_image && product.primary_image.trim() !== '') {
             const img = document.createElement('img');
             img.src = product.primary_image;
-            img.alt = product.name;
+            img.alt = product.name || 'Product image';
             img.className = 'product-image';
-            card.appendChild(img);
+            
+            // Handle image load errors
+            img.onerror = function() {
+                // Replace with placeholder on error
+                imgContainer.innerHTML = '';
+                const placeholder = document.createElement('div');
+                placeholder.className = 'product-image-placeholder';
+                placeholder.innerHTML = '📦';
+                placeholder.title = 'Image not available';
+                imgContainer.appendChild(placeholder);
+            };
+            
+            imgContainer.appendChild(img);
+        } else {
+            // No image URL provided - show placeholder
+            const placeholder = document.createElement('div');
+            placeholder.className = 'product-image-placeholder';
+            placeholder.innerHTML = '📦';
+            placeholder.title = 'No image available';
+            imgContainer.appendChild(placeholder);
         }
+        
+        card.appendChild(imgContainer);
 
         // Product info
         const info = document.createElement('div');
@@ -559,7 +327,10 @@ document.addEventListener('DOMContentLoaded', () => {
         if (product.complementary_colors) {
             const matches = document.createElement('div');
             matches.className = 'color-matches';
-            matches.innerHTML = `<strong>Pairs with:</strong> ${product.complementary_colors}`;
+            // Limit to first 3 colors
+            const colorsList = product.complementary_colors.split(',').map(c => c.trim()).slice(0, 3);
+            const limitedColors = colorsList.join(', ');
+            matches.innerHTML = `<strong>Pairs with:</strong> ${limitedColors}`;
             info.appendChild(matches);
         }
 
@@ -569,7 +340,7 @@ document.addEventListener('DOMContentLoaded', () => {
             link.href = product.url;
             link.target = '_blank';
             link.className = 'product-link';
-            link.textContent = 'View';
+            link.textContent = 'View Product →';
             info.appendChild(link);
         }
 
@@ -592,16 +363,14 @@ document.addEventListener('DOMContentLoaded', () => {
             tagButton.classList.remove('tagged');
             tagButton.title = 'Tag product';
         } else {
-            // Tag - IMPORTANT: Preserve all product attributes including gender
+            // Tag
             const taggedProduct = {
                 index: productIndex,
                 name: product.name,
                 category: product.category || '',
-                gender: product.gender || selectedGender || '', // Include current gender filter if product doesn't have one
                 url: product.url || '',
                 primary_image: product.primary_image || '',
-                price: product.price || '',
-                timestamp: Date.now()
+                price: product.price || ''
             };
             taggedProducts.push(taggedProduct);
             card.classList.add('tagged');
@@ -610,6 +379,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         
         saveTaggedProducts();
+        
+        // Update tagged indicator near input field
+        updateTaggedIndicator();
         
         // Visual feedback animation
         card.style.transform = 'scale(1.02)';
@@ -620,43 +392,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function showLoading(show) {
         loadingIndicator.style.display = show ? 'flex' : 'none';
-    }
-    
-    // Typing indicator functions
-    const typingIndicator = document.getElementById('typing-indicator');
-    
-    function showTypingIndicator() {
-        if (typingIndicator) {
-            typingIndicator.style.display = 'flex';
-            messagesContainer.scrollTop = messagesContainer.scrollHeight;
-        }
-    }
-    
-    function hideTypingIndicator() {
-        if (typingIndicator) {
-            typingIndicator.style.display = 'none';
-        }
-    }
-
-    // Function to show personalized welcome
-    function showPersonalizedWelcome() {
-        const storedPrefs = localStorage.getItem('cleo_user_preferences');
-        if (storedPrefs) {
-            try {
-                const prefs = JSON.parse(storedPrefs);
-                if (prefs.favorite_colors && prefs.favorite_colors.length > 0) {
-                    setTimeout(() => {
-                        addMessage(`Welcome back! I remember you like ${prefs.favorite_colors[0]} items. Want to see what's new?`, 'bot');
-                    }, 1000);
-                } else if (prefs.style_preferences && prefs.style_preferences.length > 0) {
-                    setTimeout(() => {
-                        addMessage(`Welcome back! Looking for more ${prefs.style_preferences[0]} styles today?`, 'bot');
-                    }, 1000);
-                }
-            } catch (e) {
-                console.error('Error parsing preferences:', e);
-            }
-        }
     }
 
     // Check API health on load
@@ -670,8 +405,6 @@ document.addEventListener('DOMContentLoaded', () => {
         .then(data => {
             if (data.status === 'healthy') {
                 console.log(`✅ Connected: ${data.products_loaded} products loaded`);
-                // Show personalized welcome after connection
-                showPersonalizedWelcome();
             }
         })
         .catch(err => {
