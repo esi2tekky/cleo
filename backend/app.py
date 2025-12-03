@@ -843,7 +843,9 @@ def handle_query():
     has_category = any(cat in query_lower for cat in category_keywords_for_search)
     
     # Check for style/color phrases that indicate product search
-    style_phrases = ['pop of color', 'something to wear', 'something for', 'wear for', 'wear with']
+    style_phrases = ['pop of color', 'something to wear', 'something for', 'wear for', 'wear with',
+                     'what would i wear', 'what can i wear', 'what should i wear', 'what to wear',
+                     'wear in', 'wear to', 'outfit for', 'clothes for', 'dress for']
     has_style_phrase = any(phrase in query_lower for phrase in style_phrases)
     
     # Query implies product search if it has product-related content
@@ -1045,6 +1047,11 @@ def handle_query():
         # Detect "only" keyword - this enforces strict filtering
         strict_mode = 'only' in query_lower or 'just' in query_lower
     
+    # Flag to control whether fallback filtering runs
+    # When parsed_query is available (OpenAI parsing worked), skip keyword-based filtering
+    # to avoid over-filtering on situational queries like "what would I wear in paris"
+    use_fallback_filtering = not parsed_query
+    
     # Filter by product type (scarf, vest, sock, t-shirt, glove, etc.)
     # Define product types with their keywords and related types (e.g., cardigans are sweaters)
     product_types = {
@@ -1183,7 +1190,8 @@ def handle_query():
                 break
     
     # Apply product type filter (including related types)
-    if detected_product_types:
+    # Only apply if using fallback filtering (OpenAI parsing not available)
+    if use_fallback_filtering and detected_product_types:
         type_mask = pd.Series([False] * len(results_df), index=results_df.index)
         for product_type in detected_product_types:
             type_info = product_types[product_type]
@@ -1212,7 +1220,8 @@ def handle_query():
             detected_categories.append(category_keyword)
     
     # Filter by category if detected (only for categories that aren't product types)
-    if detected_categories:
+    # Only apply if using fallback filtering
+    if use_fallback_filtering and detected_categories:
         category_mask = pd.Series([False] * len(results_df), index=results_df.index)
         for category_keyword in detected_categories:
             # Use exact match or word boundary to avoid partial matches
@@ -1245,7 +1254,7 @@ def handle_query():
         
         print(f"   🎯 Strict accessories filter: {len(results_df)} products")
     
-    if 'bottoms' in query_lower and 'bottoms' not in [pt.lower() for pt in detected_product_types]:
+    if use_fallback_filtering and 'bottoms' in query_lower and 'bottoms' not in [pt.lower() for pt in detected_product_types]:
         # Filter to only bottoms category
         category_mask = results_df['category'].astype(str).str.lower().str.contains('bottoms', na=False, regex=False)
         results_df = results_df[category_mask]
@@ -1260,7 +1269,7 @@ def handle_query():
         results_df = results_df[top_exclude_mask]
         print(f"   🎯 Strict bottoms filter: {len(results_df)} products")
     
-    if 'tops' in query_lower and 'tops' not in [pt.lower() for pt in detected_product_types]:
+    if use_fallback_filtering and 'tops' in query_lower and 'tops' not in [pt.lower() for pt in detected_product_types]:
         # Filter to only tops category
         category_mask = results_df['category'].astype(str).str.lower().str.contains('tops', na=False, regex=False)
         results_df = results_df[category_mask]
@@ -1283,7 +1292,7 @@ def handle_query():
             material_filters.append(material)
             break  # Only take first material found
     
-    if material_filters:
+    if use_fallback_filtering and material_filters:
         material = material_filters[0]
         results_df = results_df[
             results_df['materials'].astype(str).str.lower().str.contains(material, na=False)
@@ -1299,7 +1308,8 @@ def handle_query():
             color_filters.append(color)
     
     # Apply color filters (must match at least one)
-    if color_filters:
+    # Only apply if using fallback filtering
+    if use_fallback_filtering and color_filters:
         # If only one color is specified, be strict: only return products where it's the primary color
         if len(color_filters) == 1:
             color = color_filters[0]
@@ -1336,7 +1346,8 @@ def handle_query():
     
     # Handle style/color phrases like "pop of color", "colorful", "vibrant"
     # Only apply if OpenAI parsing didn't already handle it via style keywords
-    if not parsed_query or not parsed_query.get('attributes', {}).get('styles'):
+    # AND if using fallback filtering
+    if use_fallback_filtering and (not parsed_query or not parsed_query.get('attributes', {}).get('styles')):
         # Fallback: use keyword matching only if OpenAI didn't parse styles
         if 'pop of color' in query_lower or 'colorful' in query_lower or 'vibrant' in query_lower or 'bright' in query_lower:
             # Filter for products with vibrant colors (exclude neutral/muted colors)
@@ -1360,7 +1371,8 @@ def handle_query():
             print(f"   🎨 Filtered for colorful/vibrant products: {len(results_df)} products")
     
     # Filter by price (apply last, as it's often optional)
-    if 'under' in query_lower or '$' in query_lower or 'dollar' in query_lower:
+    # Only apply if using fallback filtering
+    if use_fallback_filtering and ('under' in query_lower or '$' in query_lower or 'dollar' in query_lower):
         # Extract price - handle multiple formats: "$200", "200 dollars", "under 200", etc.
         import re
         max_price = None
@@ -1385,11 +1397,12 @@ def handle_query():
     
     # Filter by style - only use hardcoded list if OpenAI parsing didn't provide styles
     # (OpenAI parsing handles "pop of color", "funky", "professional", etc.)
-    if not parsed_query or not parsed_query.get('attributes', {}).get('styles'):
+    # Also only apply if using fallback filtering
+    style_filters = []
+    if use_fallback_filtering and (not parsed_query or not parsed_query.get('attributes', {}).get('styles')):
         # Fallback: use hardcoded style keywords only if OpenAI didn't parse any
         styles = ['minimalist', 'classic', 'modern', 'casual', 'formal', 'oversized', 'fitted', 
                   'relaxed', 'elegant', 'sophisticated', 'versatile']
-        style_filters = []
         for style in styles:
             if style in query_lower:
                 style_filters.append(style)
@@ -1406,36 +1419,40 @@ def handle_query():
             # In non-strict mode, style filters are used for semantic ranking later
     
     # Handle negative filters (exclusions) - generalized approach
-    # Detect "no X", "without X", "no Xs" patterns
-    import re
-    
-    # Common product types to ignore when extracting exclusions
-    # NOTE: This is a list, not the product_types dictionary defined earlier
-    product_type_names = ['sweater', 'sweaters', 'cardigan', 'cardigans', 'hoodie', 'hoodies',
+    # Only apply if using fallback filtering
+    normalized_excluded = []
+    excluded_features = []  # Initialize here so it's always defined
+    if use_fallback_filtering:
+        # Detect "no X", "without X", "no Xs" patterns
+        import re
+        
+        # Common product types to ignore when extracting exclusions
+        # NOTE: This is a list, not the product_types dictionary defined earlier
+        product_type_names = ['sweater', 'sweaters', 'cardigan', 'cardigans', 'hoodie', 'hoodies',
                          'shirt', 'shirts', 'top', 'tops', 'pants', 'trousers', 'jacket', 'jackets']
-    
-    # Pattern to match: "no/without [feature]" or "[feature] with no/without [feature2]"
-    negative_patterns = [
-        r'\bno\s+(\w+)s?\b',  # "no buttons", "no pattern"
-        r'\bwithout\s+(?:a\s+)?(\w+)s?\b',  # "without a hood", "without buttons"
-        r'\bwith\s+no\s+(\w+)s?\b',  # "with no buttons" (captures buttons, not sweaters)
-    ]
-    
-    excluded_features = []
-    
-    # Extract excluded features from query
-    for pattern in negative_patterns:
-        matches = re.findall(pattern, query_lower)
-        if matches:
-            for match in matches:
-                if isinstance(match, tuple):
-                    # For patterns with multiple groups, take the feature (not product type)
-                    for m in match:
-                        if m and m.lower() not in product_type_names:
-                            excluded_features.append(m)
-                else:
-                    if match and match.lower() not in product_type_names:
-                        excluded_features.append(match)
+        
+        # Pattern to match: "no/without [feature]" or "[feature] with no/without [feature2]"
+        negative_patterns = [
+            r'\bno\s+(\w+)s?\b',  # "no buttons", "no pattern"
+            r'\bwithout\s+(?:a\s+)?(\w+)s?\b',  # "without a hood", "without buttons"
+            r'\bwith\s+no\s+(\w+)s?\b',  # "with no buttons" (captures buttons, not sweaters)
+        ]
+        
+        excluded_features = []
+        
+        # Extract excluded features from query
+        for pattern in negative_patterns:
+            matches = re.findall(pattern, query_lower)
+            if matches:
+                for match in matches:
+                    if isinstance(match, tuple):
+                        # For patterns with multiple groups, take the feature (not product type)
+                        for m in match:
+                            if m and m.lower() not in product_type_names:
+                                excluded_features.append(m)
+                    else:
+                        if match and match.lower() not in product_type_names:
+                            excluded_features.append(match)
     
     # Normalize feature names
     feature_mapping = {
@@ -1505,7 +1522,8 @@ def handle_query():
     
     # Special cases for common exclusions
     # "sleeveless" means no sleeves
-    if 'sleeveless' in query_lower:
+    # Only apply if using fallback filtering
+    if use_fallback_filtering and 'sleeveless' in query_lower:
         name_desc = (
             results_df['name'].astype(str).str.lower() + ' ' + 
             results_df['description'].astype(str).str.lower()
@@ -1514,7 +1532,8 @@ def handle_query():
         results_df = results_df[name_desc.str.contains('sleeveless', na=False, regex=False)]
     
     # "solid" can mean no pattern
-    if 'solid' in query_lower and 'pattern' not in normalized_excluded:
+    # Only apply if using fallback filtering
+    if use_fallback_filtering and 'solid' in query_lower and 'pattern' not in normalized_excluded:
         # "solid" means no pattern
         pattern_mask = (
             results_df['patterns'].isna() | 
@@ -1600,35 +1619,35 @@ def handle_query():
         
         if query_emb is not None and embeddings_dict and use_local_embeddings:
                 # Use local embeddings (384-dim sentence-transformers)
-                similarities = []
-                for idx in results_df.index:
-                    row = results_df.loc[idx]
-                    product_id = f"{row.get('name', idx)}_{idx}"
-                    emb_key = f"{product_id}_text"
-                    
-                    if emb_key in embeddings_dict:
-                        product_emb = np.array(embeddings_dict[emb_key])
-                        # Verify dimensions match
-                        if len(query_emb) != len(product_emb):
-                            print(f"   ⚠️  Dimension mismatch: query={len(query_emb)}, product={len(product_emb)}, skipping")
-                            continue
-                        similarity = np.dot(query_emb, product_emb) / (
-                            np.linalg.norm(query_emb) * np.linalg.norm(product_emb)
-                        )
-                        similarities.append((idx, similarity))
+            similarities = []
+            for idx in results_df.index:
+                row = results_df.loc[idx]
+                product_id = f"{row.get('name', idx)}_{idx}"
+                emb_key = f"{product_id}_text"
                 
-                # Sort by similarity and reorder results
-                if similarities:
-                    similarities.sort(key=lambda x: x[1], reverse=True)
-                    sorted_indices = [idx for idx, _ in similarities]
-                    # STRICT: Only include indices that are in our filtered results (before semantic search)
-                    sorted_indices = [idx for idx in sorted_indices if idx in filtered_indices_before_semantic]
-                    # Reorder results_df by similarity, but only include products that passed all filters
-                    if sorted_indices:
-                        results_df = results_df.loc[sorted_indices]
-                    else:
-                        # If no products match after filtering, keep filtered results as-is
-                        print(f"   ⚠️  Semantic search returned no products matching strict filters, using filtered results as-is")
+                if emb_key in embeddings_dict:
+                    product_emb = np.array(embeddings_dict[emb_key])
+                    # Verify dimensions match
+                    if len(query_emb) != len(product_emb):
+                        print(f"   ⚠️  Dimension mismatch: query={len(query_emb)}, product={len(product_emb)}, skipping")
+                        continue
+                    similarity = np.dot(query_emb, product_emb) / (
+                        np.linalg.norm(query_emb) * np.linalg.norm(product_emb)
+                    )
+                    similarities.append((idx, similarity))
+            
+            # Sort by similarity and reorder results
+            if similarities:
+                similarities.sort(key=lambda x: x[1], reverse=True)
+                sorted_indices = [idx for idx, _ in similarities]
+                # STRICT: Only include indices that are in our filtered results (before semantic search)
+                sorted_indices = [idx for idx in sorted_indices if idx in filtered_indices_before_semantic]
+                # Reorder results_df by similarity, but only include products that passed all filters
+                if sorted_indices:
+                    results_df = results_df.loc[sorted_indices]
+                else:
+                    # If no products match after filtering, keep filtered results as-is
+                    print(f"   ⚠️  Semantic search returned no products matching strict filters, using filtered results as-is")
             # If no similarities found, keep the filtered results as-is (they're already filtered correctly)
     
     # If results are empty BUT filters were applied, reapply filters and use semantic search on filtered set
