@@ -474,6 +474,39 @@ def handle_query():
                         ref_category = str(ref_product.get('category', '')).lower()
                         ref_name = str(ref_product.get('name', '')).lower()
                         
+                        # === STEP 1: Extract gender from tagged product ===
+                        ref_gender = None
+                        # Check if gender column exists and has a value (ref_product is a Series)
+                        if 'gender' in ref_product.index and pd.notna(ref_product['gender']):
+                            ref_gender = str(ref_product['gender']).lower()
+                        elif ref_category:
+                            # Fallback: Extract gender from category (e.g., "Women's Knitwear" -> "women")
+                            if 'women' in ref_category:
+                                ref_gender = 'women'
+                            elif 'men' in ref_category:
+                                ref_gender = 'men'
+                        
+                        # Use tagged product's gender if available, otherwise fall back to UI filter
+                        effective_gender = ref_gender if ref_gender else gender_filter
+                        print(f"   👤 Tagged product gender: {ref_gender}, UI filter: {gender_filter}, effective: {effective_gender}")
+                        
+                        # === STEP 2: Extract requested product type from query ===
+                        requested_type = None
+                        query_product_types_list = [
+                            'pants', 'trousers', 'jeans', 'chinos',
+                            'jacket', 'coat', 'blazer',
+                            'shirt', 'blouse', 'top',
+                            'sweater', 'cardigan', 'jumper', 'hoodie',
+                            'skirt', 'dress',
+                            'scarf', 'hat', 'cap', 'beanie', 'glove', 'sock', 'belt', 'tie',
+                            'shoe', 'boot', 'sneaker'
+                        ]
+                        for ptype in query_product_types_list:
+                            if ptype in query_lower:
+                                requested_type = ptype
+                                print(f"   🎯 Requested product type from query: {requested_type}")
+                                break
+                        
                         # Determine what type of product the reference is
                         ref_product_type = None
                         if 'sweater' in ref_name or 'cardigan' in ref_name or 'jumper' in ref_name or 'hoodie' in ref_name:
@@ -489,72 +522,99 @@ def handle_query():
                         # Exclude the same product type as the reference
                         results_df = products_df.copy()
                         
-                        # Apply gender filter if specified
-                        if gender_filter and gender_filter != 'all':
+                        # === STEP 3: Apply gender filter from tagged product ===
+                        if effective_gender and effective_gender != 'all':
                             if 'gender' in results_df.columns:
-                                gender_mask = results_df['gender'].astype(str).str.lower() == gender_filter.lower()
+                                gender_mask = results_df['gender'].astype(str).str.lower() == effective_gender.lower()
                                 results_df = results_df[gender_mask]
-                                print(f"   👤 Gender filter ({gender_filter}) for 'wear with': {len(results_df)} products")
+                                print(f"   👤 Gender filter ({effective_gender}) for 'wear with': {len(results_df)} products")
                             elif 'category' in results_df.columns:
-                                if gender_filter.lower() == 'men':
+                                if effective_gender.lower() == 'men':
                                     gender_mask = results_df['category'].astype(str).str.lower().str.contains("men", na=False)
-                                elif gender_filter.lower() == 'women':
+                                elif effective_gender.lower() == 'women':
                                     gender_mask = results_df['category'].astype(str).str.lower().str.contains("women", na=False)
                                 else:
                                     gender_mask = pd.Series([True] * len(results_df), index=results_df.index)
                                 results_df = results_df[gender_mask]
-                                print(f"   👤 Gender filter ({gender_filter}) from category for 'wear with': {len(results_df)} products")
+                                print(f"   👤 Gender filter ({effective_gender}) from category for 'wear with': {len(results_df)} products")
                         
-                        # Define complementary product types based on reference
-                        # IMPORTANT: Do NOT include the same product type (e.g., don't include sweaters when reference is a sweater)
-                        complementary_types = {
-                            'shirt': ['pants', 'trousers', 'jacket', 'coat', 'blazer', 'shoe', 'boot', 'sneaker', 'scarf', 'hat', 'cap', 'beanie', 'belt', 'tie', 'sock'],
-                            'sweater': ['pants', 'trousers', 'jacket', 'coat', 'shirt', 'blouse', 'shoe', 'boot', 'sneaker', 'scarf', 'hat', 'cap', 'beanie', 'glove', 'sock', 'belt'],
-                            'pants': ['shirt', 'blouse', 'sweater', 'cardigan', 'jacket', 'coat', 'blazer', 'shoe', 'boot', 'sneaker', 'belt', 'sock'],
-                            'jacket': ['shirt', 'blouse', 'sweater', 'cardigan', 'pants', 'trousers', 'shoe', 'boot', 'sneaker', 'scarf', 'hat', 'cap', 'beanie', 'glove', 'belt'],
-                            'default': ['pants', 'trousers', 'jacket', 'coat', 'blazer', 'shirt', 'blouse', 'shoe', 'boot', 'sneaker', 'scarf', 'hat', 'cap', 'beanie', 'glove', 'sock', 'belt', 'tie', 'vest']
-                        }
-                        
-                        # Get complementary keywords for this product type
-                        comp_keywords = complementary_types.get(ref_product_type, complementary_types['default'])
-                        
-                        # Also include accessories
-                        accessory_keywords = ['scarf', 'glove', 'sock', 'hat', 'cap', 'beanie', 'balaclava', 'vest', 'belt', 'tie', 'ring']
-                        all_keywords = list(set(comp_keywords + accessory_keywords))
-                        
-                        # Build mask for complementary items
-                        complementary_mask = pd.Series([False] * len(results_df), index=results_df.index)
-                        
-                        for keyword in all_keywords:
-                            name_match = results_df['name'].astype(str).str.lower().str.contains(keyword, na=False)
-                            category_match = results_df['category'].astype(str).str.lower().str.contains(keyword, na=False)
-                            complementary_mask |= (name_match | category_match)
-                        
-                        # Also check if category is "accessories" or other complementary categories
-                        if 'category' in results_df.columns:
-                            comp_categories = ['accessories', 'outerwear', 'bottoms', 'footwear', 'tops']
-                            for cat in comp_categories:
-                                cat_match = results_df['category'].astype(str).str.lower().str.contains(cat, na=False)
-                                complementary_mask |= cat_match
-                        
-                        results_df = results_df[complementary_mask]
-                        
-                        # Exclude the same product type as reference (more strict exclusion)
-                        if ref_product_type:
-                            exclude_keywords = {
-                                'sweater': ['sweater', 'cardigan', 'jumper', 'hoodie'],
-                                'shirt': ['shirt', 'blouse', 'polo', 'tee', 't-shirt', 'henley'],
+                        # === STEP 4: If user requested specific product type, filter to that ===
+                        if requested_type:
+                            # Map related terms (e.g., pants -> trousers)
+                            type_synonyms = {
                                 'pants': ['pants', 'trousers', 'jeans', 'chinos'],
-                                'jacket': ['jacket', 'coat', 'blazer', 'overshirt']
+                                'trousers': ['pants', 'trousers', 'jeans', 'chinos'],
+                                'jacket': ['jacket', 'coat', 'blazer'],
+                                'coat': ['jacket', 'coat', 'blazer'],
+                                'shirt': ['shirt', 'blouse'],
+                                'blouse': ['shirt', 'blouse'],
+                                'sweater': ['sweater', 'cardigan', 'jumper', 'pullover'],
+                                'cardigan': ['sweater', 'cardigan', 'jumper', 'pullover'],
                             }
-                            if ref_product_type in exclude_keywords:
-                                # Build exclusion mask: exclude items that contain ANY of the exclude keywords
-                                exclude_mask = pd.Series([False] * len(results_df), index=results_df.index)
-                                for keyword in exclude_keywords[ref_product_type]:
-                                    exclude_mask |= results_df['name'].astype(str).str.lower().str.contains(keyword, na=False)
-                                # Keep only items that DON'T match the exclusion mask
-                                results_df = results_df[~exclude_mask]
-                                print(f"   🚫 Excluded {ref_product_type} products: {len(results_df)} remaining")
+                            search_terms = type_synonyms.get(requested_type, [requested_type])
+                            
+                            type_mask = pd.Series([False] * len(results_df), index=results_df.index)
+                            for term in search_terms:
+                                type_mask |= results_df['name'].astype(str).str.lower().str.contains(term, na=False)
+                                # Also check category for the type
+                                if 'category' in results_df.columns:
+                                    type_mask |= results_df['category'].astype(str).str.lower().str.contains(term, na=False)
+                            results_df = results_df[type_mask]
+                            print(f"   🎯 Filtered to requested type '{requested_type}' (terms: {search_terms}): {len(results_df)} products")
+                        
+                        # Only apply complementary type filtering if user didn't request a specific type
+                        # If user asked for "pants", we already filtered to pants above
+                        if not requested_type:
+                            # Define complementary product types based on reference
+                            # IMPORTANT: Do NOT include the same product type (e.g., don't include sweaters when reference is a sweater)
+                            complementary_types = {
+                                'shirt': ['pants', 'trousers', 'jacket', 'coat', 'blazer', 'shoe', 'boot', 'sneaker', 'scarf', 'hat', 'cap', 'beanie', 'belt', 'tie', 'sock'],
+                                'sweater': ['pants', 'trousers', 'jacket', 'coat', 'shirt', 'blouse', 'shoe', 'boot', 'sneaker', 'scarf', 'hat', 'cap', 'beanie', 'glove', 'sock', 'belt'],
+                                'pants': ['shirt', 'blouse', 'sweater', 'cardigan', 'jacket', 'coat', 'blazer', 'shoe', 'boot', 'sneaker', 'belt', 'sock'],
+                                'jacket': ['shirt', 'blouse', 'sweater', 'cardigan', 'pants', 'trousers', 'shoe', 'boot', 'sneaker', 'scarf', 'hat', 'cap', 'beanie', 'glove', 'belt'],
+                                'default': ['pants', 'trousers', 'jacket', 'coat', 'blazer', 'shirt', 'blouse', 'shoe', 'boot', 'sneaker', 'scarf', 'hat', 'cap', 'beanie', 'glove', 'sock', 'belt', 'tie', 'vest']
+                            }
+                            
+                            # Get complementary keywords for this product type
+                            comp_keywords = complementary_types.get(ref_product_type, complementary_types['default'])
+                            
+                            # Also include accessories
+                            accessory_keywords = ['scarf', 'glove', 'sock', 'hat', 'cap', 'beanie', 'balaclava', 'vest', 'belt', 'tie', 'ring']
+                            all_keywords = list(set(comp_keywords + accessory_keywords))
+                            
+                            # Build mask for complementary items
+                            complementary_mask = pd.Series([False] * len(results_df), index=results_df.index)
+                            
+                            for keyword in all_keywords:
+                                name_match = results_df['name'].astype(str).str.lower().str.contains(keyword, na=False)
+                                category_match = results_df['category'].astype(str).str.lower().str.contains(keyword, na=False)
+                                complementary_mask |= (name_match | category_match)
+                            
+                            # Also check if category is "accessories" or other complementary categories
+                            if 'category' in results_df.columns:
+                                comp_categories = ['accessories', 'outerwear', 'bottoms', 'footwear', 'tops']
+                                for cat in comp_categories:
+                                    cat_match = results_df['category'].astype(str).str.lower().str.contains(cat, na=False)
+                                    complementary_mask |= cat_match
+                            
+                            results_df = results_df[complementary_mask]
+                            
+                            # Exclude the same product type as reference (more strict exclusion)
+                            if ref_product_type:
+                                exclude_keywords = {
+                                    'sweater': ['sweater', 'cardigan', 'jumper', 'hoodie'],
+                                    'shirt': ['shirt', 'blouse', 'polo', 'tee', 't-shirt', 'henley'],
+                                    'pants': ['pants', 'trousers', 'jeans', 'chinos'],
+                                    'jacket': ['jacket', 'coat', 'blazer', 'overshirt']
+                                }
+                                if ref_product_type in exclude_keywords:
+                                    # Build exclusion mask: exclude items that contain ANY of the exclude keywords
+                                    exclude_mask = pd.Series([False] * len(results_df), index=results_df.index)
+                                    for keyword in exclude_keywords[ref_product_type]:
+                                        exclude_mask |= results_df['name'].astype(str).str.lower().str.contains(keyword, na=False)
+                                    # Keep only items that DON'T match the exclusion mask
+                                    results_df = results_df[~exclude_mask]
+                                    print(f"   🚫 Excluded {ref_product_type} products: {len(results_df)} remaining")
                         
                         # Exclude the reference product itself (ensure it's not in results)
                         initial_count = len(results_df)
@@ -693,21 +753,38 @@ def handle_query():
                                 print(f"   ⚠️  Reference product embedding not found in local embeddings")
                                 results_df = pd.DataFrame()
                         
-                        # Apply gender filter if specified
-                        if not results_df.empty and gender_filter and gender_filter != 'all':
+                        # === Extract gender from tagged product for similar products ===
+                        ref_category_similar = str(ref_product.get('category', '')).lower()
+                        ref_gender_similar = None
+                        # Check if gender column exists and has a value (ref_product is a Series)
+                        if 'gender' in ref_product.index and pd.notna(ref_product['gender']):
+                            ref_gender_similar = str(ref_product['gender']).lower()
+                        elif ref_category_similar:
+                            # Fallback: Extract gender from category (e.g., "Women's Knitwear" -> "women")
+                            if 'women' in ref_category_similar:
+                                ref_gender_similar = 'women'
+                            elif 'men' in ref_category_similar:
+                                ref_gender_similar = 'men'
+                        
+                        # Use tagged product's gender if available, otherwise fall back to UI filter
+                        effective_gender_similar = ref_gender_similar if ref_gender_similar else gender_filter
+                        print(f"   👤 Tagged product gender: {ref_gender_similar}, UI filter: {gender_filter}, effective: {effective_gender_similar}")
+                        
+                        # Apply gender filter from tagged product
+                        if not results_df.empty and effective_gender_similar and effective_gender_similar != 'all':
                             if 'gender' in results_df.columns:
-                                gender_mask = results_df['gender'].astype(str).str.lower() == gender_filter.lower()
+                                gender_mask = results_df['gender'].astype(str).str.lower() == effective_gender_similar.lower()
                                 results_df = results_df[gender_mask]
-                                print(f"   👤 Gender filter ({gender_filter}) for similar products: {len(results_df)} products")
+                                print(f"   👤 Gender filter ({effective_gender_similar}) for similar products: {len(results_df)} products")
                             elif 'category' in results_df.columns:
-                                if gender_filter.lower() == 'men':
+                                if effective_gender_similar.lower() == 'men':
                                     gender_mask = results_df['category'].astype(str).str.lower().str.contains("men", na=False)
-                                elif gender_filter.lower() == 'women':
+                                elif effective_gender_similar.lower() == 'women':
                                     gender_mask = results_df['category'].astype(str).str.lower().str.contains("women", na=False)
                                 else:
                                     gender_mask = pd.Series([True] * len(results_df), index=results_df.index)
                                 results_df = results_df[gender_mask]
-                                print(f"   👤 Gender filter ({gender_filter}) from category for similar products: {len(results_df)} products")
+                                print(f"   👤 Gender filter ({effective_gender_similar}) from category for similar products: {len(results_df)} products")
                         
                         # Apply filters from the query (e.g., "patterned sweaters" should filter by product type and pattern)
                         if not results_df.empty:
@@ -844,8 +921,9 @@ def handle_query():
     
     # Check for style/color phrases that indicate product search
     style_phrases = ['pop of color', 'something to wear', 'something for', 'wear for', 'wear with',
-                     'what would i wear', 'what can i wear', 'what should i wear', 'what to wear',
-                     'wear in', 'wear to', 'outfit for', 'clothes for', 'dress for']
+                     'what would i wear', 'what can i wear', 'what should i wear', 'what could i wear',
+                     'what to wear', 'wear in', 'wear to', 'outfit for', 'clothes for', 'dress for',
+                     'cold night', 'warm day', 'beach day', 'fall day', 'winter', 'summer', 'spring']
     has_style_phrase = any(phrase in query_lower for phrase in style_phrases)
     
     # Query implies product search if it has product-related content
@@ -1044,8 +1122,10 @@ def handle_query():
         
     else:
         # Fallback to keyword-based filtering (existing code)
-        # Detect "only" keyword - this enforces strict filtering
-        strict_mode = 'only' in query_lower or 'just' in query_lower
+        pass
+    
+    # Detect "only" keyword - this enforces strict filtering
+    strict_mode = 'only' in query_lower or 'just' in query_lower
     
     # Flag to control whether fallback filtering runs
     # When parsed_query is available (OpenAI parsing worked), skip keyword-based filtering
@@ -1429,7 +1509,7 @@ def handle_query():
         # Common product types to ignore when extracting exclusions
         # NOTE: This is a list, not the product_types dictionary defined earlier
         product_type_names = ['sweater', 'sweaters', 'cardigan', 'cardigans', 'hoodie', 'hoodies',
-                         'shirt', 'shirts', 'top', 'tops', 'pants', 'trousers', 'jacket', 'jackets']
+                             'shirt', 'shirts', 'top', 'tops', 'pants', 'trousers', 'jacket', 'jackets']
         
         # Pattern to match: "no/without [feature]" or "[feature] with no/without [feature2]"
         negative_patterns = [
