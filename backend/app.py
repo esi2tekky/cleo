@@ -254,6 +254,10 @@ def handle_query():
     last_displayed_products = data.get('last_displayed_products', [])  # Products from last query
     gender_filter = data.get('gender', 'all')  # 'men', 'women', or 'all'
     
+    # Ablation study flags (default to True for normal operation)
+    use_filtering = data.get('use_filtering', True)
+    use_semantic = data.get('use_semantic', True)
+    
     if not query_text:
         return jsonify({'error': 'Query text required'}), 400
     
@@ -970,7 +974,8 @@ def handle_query():
                 print(f"   👤 Gender filter ({gender_filter}) from category: {len(results_df)} products")
     
     # Use parsed query if available, otherwise fall back to keyword-based
-    if parsed_query:
+    # Only apply filtering if use_filtering is True
+    if parsed_query and use_filtering:
         # Apply filters based on parsed query
         strict_mode = parsed_query.get('filters', {}).get('strict', False)
         
@@ -1130,7 +1135,20 @@ def handle_query():
     # Flag to control whether fallback filtering runs
     # When parsed_query is available (OpenAI parsing worked), skip keyword-based filtering
     # to avoid over-filtering on situational queries like "what would I wear in paris"
-    use_fallback_filtering = not parsed_query
+    # However, if parsed_query exists but has no useful filtering info (null product_type, etc.),
+    # we should still run fallback filtering
+    # Also respect use_filtering flag
+    if parsed_query:
+        # Check if parsed query has useful filtering information
+        has_product_type = parsed_query.get('product_type') or parsed_query.get('product_types')
+        has_attributes = any(parsed_query.get('attributes', {}).values())
+        has_price = parsed_query.get('price', {}).get('min') or parsed_query.get('price', {}).get('max')
+        has_filters = parsed_query.get('filters', {}).get('must_have') or parsed_query.get('filters', {}).get('must_not_have')
+        has_useful_info = has_product_type or has_attributes or has_price or has_filters
+        # Only skip fallback if parsed query has useful filtering info
+        use_fallback_filtering = not has_useful_info and use_filtering
+    else:
+        use_fallback_filtering = use_filtering
     
     # Filter by product type (scarf, vest, sock, t-shirt, glove, etc.)
     # Define product types with their keywords and related types (e.g., cardigans are sweaters)
@@ -1642,96 +1660,105 @@ def handle_query():
         'strict': strict_mode
     }
     
-    # If we have embeddings and filtered results, do semantic search ONLY on filtered results
-    # IMPORTANT: Store the filtered indices BEFORE semantic search to ensure we don't add back non-matching products
-    filtered_indices_before_semantic = set(results_df.index) if not results_df.empty else set()
-    print(f"   📊 Before semantic search: {len(filtered_indices_before_semantic)} products passed all filters")
-    
-    if not results_df.empty:
-        # Choose embedding method based on what's available
-        query_emb = None
+    # Apply semantic ranking if enabled (for ablation study)
+    if use_semantic:
+        # If we have embeddings and filtered results, do semantic search ONLY on filtered results
+        # IMPORTANT: Store the filtered indices BEFORE semantic search to ensure we don't add back non-matching products
+        filtered_indices_before_semantic = set(results_df.index) if not results_df.empty else set()
+        print(f"   📊 Before semantic search: {len(filtered_indices_before_semantic)} products passed all filters")
         
-        # If Pinecone is available, use OpenAI embeddings (1536-dim) to match Pinecone index
-        if pinecone_client and pinecone_client.is_available() and openai_embedder:
-            query_emb = openai_embedder.get_embedding(query_text)
-            if query_emb is not None:
-                # Use Pinecone for vector search on filtered products
-                product_indices = results_df.index.tolist()
-                matches = pinecone_client.query_with_product_indices(
-                    query_emb,
-                    product_indices,
-                    top_k=top_k
-                )
-                
-                if matches:
-                    # Sort by similarity score (already sorted by Pinecone)
-                    sorted_indices = [idx for idx, _ in matches]
-                    print(f"   🔍 Pinecone returned {len(sorted_indices)} matches")
-                    # STRICT: Only keep indices that are in our filtered results
-                    sorted_indices = [idx for idx in sorted_indices if idx in filtered_indices_before_semantic]
-                    print(f"   ✅ After strict filter check: {len(sorted_indices)} matches still in filtered set")
-                    if sorted_indices:
-                        # Reorder filtered results by similarity, but only include products that passed all filters
-                        results_df = results_df.loc[sorted_indices]
-                        print(f"   📦 Final results: {len(results_df)} products (all should have '{color_filters[0] if color_filters else 'N/A'}' as primary color)")
-                    else:
-                        # If Pinecone didn't return any matching products, keep the filtered results as-is
-                        print(f"   ⚠️  Pinecone returned no products matching filters, using filtered results as-is")
-                else:
-                    # If Pinecone returned no matches, keep the filtered results as-is
-                    pass
-            else:
-                # OpenAI embedder unavailable, will fall back to local embeddings below
-                pass
-        
-        # Fallback to local embeddings (sentence-transformers, 384-dim) ONLY if Pinecone is not available
-        # IMPORTANT: If Pinecone is available but returned no matches, we should NOT fall back to local embeddings
-        # because that would mix 1536-dim (OpenAI) with 384-dim (sentence-transformers) embeddings
-        # Instead, we just use the filtered results as-is (which is already done above)
-        use_local_embeddings = False
-        if query_emb is None and enricher and embeddings_dict:
-            # Pinecone not available OR OpenAI embedder not available, use local embeddings
-            # This is the only case where we should use local embeddings
-            if not (pinecone_client and pinecone_client.is_available() and openai_embedder):
-                query_emb = enricher.get_text_embedding(query_text)
-                use_local_embeddings = True
-                print(f"   📦 Using local embeddings (Pinecone not available or OpenAI embedder not available)")
-        
-        if query_emb is not None and embeddings_dict and use_local_embeddings:
-                # Use local embeddings (384-dim sentence-transformers)
-            similarities = []
-            for idx in results_df.index:
-                row = results_df.loc[idx]
-                product_id = f"{row.get('name', idx)}_{idx}"
-                emb_key = f"{product_id}_text"
-                
-                if emb_key in embeddings_dict:
-                    product_emb = np.array(embeddings_dict[emb_key])
-                    # Verify dimensions match
-                    if len(query_emb) != len(product_emb):
-                        print(f"   ⚠️  Dimension mismatch: query={len(query_emb)}, product={len(product_emb)}, skipping")
-                        continue
-                    similarity = np.dot(query_emb, product_emb) / (
-                        np.linalg.norm(query_emb) * np.linalg.norm(product_emb)
-                    )
-                    similarities.append((idx, similarity))
+        if not results_df.empty:
+            # Choose embedding method based on what's available
+            query_emb = None
             
-            # Sort by similarity and reorder results
-            if similarities:
-                similarities.sort(key=lambda x: x[1], reverse=True)
-                sorted_indices = [idx for idx, _ in similarities]
-                # STRICT: Only include indices that are in our filtered results (before semantic search)
-                sorted_indices = [idx for idx in sorted_indices if idx in filtered_indices_before_semantic]
-                # Reorder results_df by similarity, but only include products that passed all filters
-                if sorted_indices:
-                    results_df = results_df.loc[sorted_indices]
+            # If Pinecone is available, use OpenAI embeddings (1536-dim) to match Pinecone index
+            if pinecone_client and pinecone_client.is_available() and openai_embedder:
+                query_emb = openai_embedder.get_embedding(query_text)
+                if query_emb is not None:
+                    # Use Pinecone for vector search on filtered products
+                    product_indices = results_df.index.tolist()
+                    matches = pinecone_client.query_with_product_indices(
+                        query_emb,
+                        product_indices,
+                        top_k=top_k
+                    )
+                    
+                    if matches:
+                        # Sort by similarity score (already sorted by Pinecone)
+                        sorted_indices = [idx for idx, _ in matches]
+                        print(f"   🔍 Pinecone returned {len(sorted_indices)} matches")
+                        # STRICT: Only keep indices that are in our filtered results
+                        sorted_indices = [idx for idx in sorted_indices if idx in filtered_indices_before_semantic]
+                        print(f"   ✅ After strict filter check: {len(sorted_indices)} matches still in filtered set")
+                        if sorted_indices:
+                            # Reorder filtered results by similarity, but only include products that passed all filters
+                            results_df = results_df.loc[sorted_indices]
+                            print(f"   📦 Final results: {len(results_df)} products (all should have '{color_filters[0] if color_filters else 'N/A'}' as primary color)")
+                        else:
+                            # If Pinecone didn't return any matching products, keep the filtered results as-is
+                            print(f"   ⚠️  Pinecone returned no products matching filters, using filtered results as-is")
+                    else:
+                        # If Pinecone returned no matches, keep the filtered results as-is
+                        pass
                 else:
-                    # If no products match after filtering, keep filtered results as-is
-                    print(f"   ⚠️  Semantic search returned no products matching strict filters, using filtered results as-is")
-            # If no similarities found, keep the filtered results as-is (they're already filtered correctly)
+                    # OpenAI embedder unavailable, will fall back to local embeddings below
+                    pass
+            
+            # Fallback to local embeddings (sentence-transformers, 384-dim) ONLY if Pinecone is not available
+            # IMPORTANT: If Pinecone is available but returned no matches, we should NOT fall back to local embeddings
+            # because that would mix 1536-dim (OpenAI) with 384-dim (sentence-transformers) embeddings
+            # Instead, we just use the filtered results as-is (which is already done above)
+            use_local_embeddings = False
+            if query_emb is None and enricher and embeddings_dict:
+                # Pinecone not available OR OpenAI embedder not available, use local embeddings
+                # This is the only case where we should use local embeddings
+                if not (pinecone_client and pinecone_client.is_available() and openai_embedder):
+                    query_emb = enricher.get_text_embedding(query_text)
+                    use_local_embeddings = True
+                    print(f"   📦 Using local embeddings (Pinecone not available or OpenAI embedder not available)")
+            
+            if query_emb is not None and embeddings_dict and use_local_embeddings:
+                # Use local embeddings (384-dim sentence-transformers)
+                similarities = []
+                for idx in results_df.index:
+                    row = results_df.loc[idx]
+                    product_id = f"{row.get('name', idx)}_{idx}"
+                    emb_key = f"{product_id}_text"
+                    
+                    if emb_key in embeddings_dict:
+                        product_emb = np.array(embeddings_dict[emb_key])
+                        # Verify dimensions match
+                        if len(query_emb) != len(product_emb):
+                            print(f"   ⚠️  Dimension mismatch: query={len(query_emb)}, product={len(product_emb)}, skipping")
+                            continue
+                        similarity = np.dot(query_emb, product_emb) / (
+                            np.linalg.norm(query_emb) * np.linalg.norm(product_emb)
+                        )
+                        similarities.append((idx, similarity))
+                
+                # Sort by similarity and reorder results
+                if similarities:
+                    similarities.sort(key=lambda x: x[1], reverse=True)
+                    sorted_indices = [idx for idx, _ in similarities]
+                    # STRICT: Only include indices that are in our filtered results (before semantic search)
+                    sorted_indices = [idx for idx in sorted_indices if idx in filtered_indices_before_semantic]
+                    # Reorder results_df by similarity, but only include products that passed all filters
+                    if sorted_indices:
+                        results_df = results_df.loc[sorted_indices]
+                    else:
+                        # If no products match after filtering, keep filtered results as-is
+                        print(f"   ⚠️  Semantic search returned no products matching strict filters, using filtered results as-is")
+                # If no similarities found, keep the filtered results as-is (they're already filtered correctly)
+    else:
+        print("   🚫 Semantic ranking disabled for ablation study.")
+        # When semantic ranking is disabled, sort results by index to ensure consistent ordering
+        # This prevents returning results in arbitrary DataFrame order
+        if not results_df.empty:
+            results_df = results_df.sort_index()
+            print(f"   📊 Results sorted by index (semantic disabled): {len(results_df)} products")
     
     # If results are empty BUT filters were applied, reapply filters and use semantic search on filtered set
-    elif embeddings_dict and enricher and results_df.empty and any(filters_applied.values()):
+    if use_semantic and embeddings_dict and enricher and results_df.empty and any(filters_applied.values()):
         # Rebuild the filtered set (respecting all filters)
         filtered_df = products_df.copy()
         
